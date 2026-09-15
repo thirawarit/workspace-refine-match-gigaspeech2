@@ -63,6 +63,7 @@ def run_inference(
     dry_run: bool = False,
     resume: bool = True,
     force_resume: bool = False,
+    device_explicit: bool = False,
 ) -> InferenceStats:
     """Transcribe ``input_path`` into ``predicted-<name>`` beside it."""
     started: float = time.monotonic()
@@ -93,7 +94,7 @@ def run_inference(
         LOGGER.info("dry-run complete: %s", stats.summary())
         return stats
 
-    device: str = resolve_device(cfg.device)
+    device: str = resolve_device(cfg.device, explicit=device_explicit)
     model: AsrModelWrapper = AsrModelWrapper(cfg.model, device, audio_cfg=cfg.audio)
     model.load()
 

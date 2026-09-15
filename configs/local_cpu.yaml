@@ -1,5 +1,5 @@
 # Local dev profile (Apple M4 Pro). Smoke tests only — not for real runs.
-# MPS stays off: NeMo RNN-T on MPS tends to fail outright rather than degrade.
+# MPS stays off: Whisper generation on MPS is slow and historically flaky.
 # Merged over default.yaml.
 
 paths:

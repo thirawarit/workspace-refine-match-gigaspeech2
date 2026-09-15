@@ -93,6 +93,21 @@ MPS is slow and historically flaky for long generations, and a silent fallback w
 smoke test into a confusing hang. The runner also
 exports `CUDA_VISIBLE_DEVICES=0` so the index-0 constraint holds belt-and-braces.
 
+**Device specs.** `device.prefer` entries are `cpu`, `mps`, `cuda` or `cuda:N`. A bare `cuda`
+uses `device.cuda_index`; `cuda:N` overrides it. `--device` and `--cuda-index` expose both from
+the CLI on every subcommand, so `validate` previews the choice without loading the model.
+
+**Explicit requests fail loudly.** A device named on the command line never degrades to CPU: an
+unavailable GPU, an out-of-range index, or an unparseable spec raises `DeviceConfigError` (exit
+code 4). A YAML `prefer` list keeps the soft fallback. This closes a real defect — `resolve_device`
+compared against the bare strings `"cuda"`/`"mps"`/`"cpu"`, so *any* indexed spec matched nothing,
+fell through the loop, and hit the CPU fallback. `--device cuda:1` silently ran on CPU, which on a
+ten-day corpus is the single most expensive way this pipeline can fail.
+
+Index validation also detects the `CUDA_VISIBLE_DEVICES` trap: masking renumbers devices, so a
+mask of `1` leaves the only visible GPU at `cuda:0` and pairing it with `cuda_index: 1` is always
+wrong. The error message names both values.
+
 ### 5.3 Model backend
 
 `typhoon-ai/typhoon-whisper-medium` — a Whisper-medium fine-tune (0.8B params) loaded through

@@ -4,13 +4,12 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
-from typing import List
 
 import pytest
 
-from thai_asr_batch.cli import get_parser
-from thai_asr_batch.config import (AppConfig, DeviceConfig, load_config,
-                                   resolve_device)
+from thai_asr_batch.cli import (_overrides_from_args, get_parser)
+from thai_asr_batch.config import (AppConfig, DeviceConfig, DeviceConfigError,
+                                   load_config, resolve_device)
 
 DEFAULT_CONFIG: Path = Path("configs/default.yaml")
 
@@ -84,8 +83,96 @@ def test_cuda_falls_back_to_cpu(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_cuda_uses_the_configured_index(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("thai_asr_batch.config._cuda_available", lambda: True)
+    monkeypatch.setattr("thai_asr_batch.config._cuda_device_count", lambda: 4)
     cfg: DeviceConfig = DeviceConfig(prefer=["cuda"], cuda_index=0, allow_mps=False)
     assert resolve_device(cfg) == "cuda:0"
+
+
+def test_indexed_cuda_spec_selects_that_gpu(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Regression: 'cuda:N' matched no branch and silently resolved to cpu.
+
+    Because --device maps to prefer=[value], `--device cuda:1` ran a ten-day
+    corpus on CPU. Even 'cuda:0' fell through.
+    """
+    monkeypatch.setattr("thai_asr_batch.config._cuda_available", lambda: True)
+    monkeypatch.setattr("thai_asr_batch.config._cuda_device_count", lambda: 4)
+    for spec, expected in (("cuda:1", "cuda:1"), ("cuda:0", "cuda:0"),
+                           ("CUDA:2", "cuda:2")):
+        cfg: DeviceConfig = DeviceConfig(prefer=[spec], cuda_index=0, allow_mps=False)
+        assert resolve_device(cfg) == expected
+
+
+def test_indexed_spec_overrides_cuda_index(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("thai_asr_batch.config._cuda_available", lambda: True)
+    monkeypatch.setattr("thai_asr_batch.config._cuda_device_count", lambda: 4)
+    cfg: DeviceConfig = DeviceConfig(prefer=["cuda:3"], cuda_index=0, allow_mps=False)
+    assert resolve_device(cfg) == "cuda:3"
+
+
+def test_out_of_range_index_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Caught here with a clear message, not deep inside .to(device)."""
+    monkeypatch.setattr("thai_asr_batch.config._cuda_available", lambda: True)
+    monkeypatch.setattr("thai_asr_batch.config._cuda_device_count", lambda: 2)
+    cfg: DeviceConfig = DeviceConfig(prefer=["cuda:7"], cuda_index=0, allow_mps=False)
+    with pytest.raises(DeviceConfigError, match="only 2 CUDA device"):
+        resolve_device(cfg)
+
+
+def test_unparseable_spec_always_raises() -> None:
+    """A typo is never a reason to spend ten days on CPU."""
+    cfg: DeviceConfig = DeviceConfig(prefer=["gpu"], cuda_index=0, allow_mps=False)
+    with pytest.raises(DeviceConfigError, match="unsupported device spec"):
+        resolve_device(cfg)
+
+
+def test_explicit_cuda_request_raises_when_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("thai_asr_batch.config._cuda_available", lambda: False)
+    cfg: DeviceConfig = DeviceConfig(prefer=["cuda:1"], cuda_index=0, allow_mps=False)
+    with pytest.raises(DeviceConfigError, match="CUDA is unavailable"):
+        resolve_device(cfg, explicit=True)
+
+
+def test_implicit_preference_still_falls_back(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A YAML prefer list keeps the soft fallback; only CLI requests are hard."""
+    monkeypatch.setattr("thai_asr_batch.config._cuda_available", lambda: False)
+    cfg: DeviceConfig = DeviceConfig(prefer=["cuda", "cpu"], cuda_index=0, allow_mps=False)
+    assert resolve_device(cfg, explicit=False) == "cpu"
+
+
+def test_visible_devices_mask_is_explained(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Masking renumbers devices, so mask=1 + index=1 is always wrong."""
+    monkeypatch.setattr("thai_asr_batch.config._cuda_available", lambda: True)
+    monkeypatch.setattr("thai_asr_batch.config._cuda_device_count", lambda: 1)
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "1")
+    cfg: DeviceConfig = DeviceConfig(prefer=["cuda:1"], cuda_index=0, allow_mps=False)
+    with pytest.raises(DeviceConfigError, match="renumbers devices"):
+        resolve_device(cfg)
+
+
+def test_cuda_index_flag_merges_with_prefer_list() -> None:
+    """--cuda-index alone must not wipe the YAML prefer list."""
+    parser: argparse.ArgumentParser = get_parser()
+    args: argparse.Namespace = parser.parse_args(
+        ["transcribe", "--input", "x.tsv", "--cuda-index", "2"]
+    )
+    overrides = _overrides_from_args(args)
+    assert overrides["device"] == {"cuda_index": 2}
+    assert "prefer" not in overrides["device"]
+
+    cfg: AppConfig = load_config(DEFAULT_CONFIG, overrides)
+    assert cfg.device.cuda_index == 2
+    assert cfg.device.prefer == ["cuda", "cpu"]
+
+
+def test_device_flag_is_available_on_validate() -> None:
+    """validate reports the resolved device, so it needs the flags too."""
+    parser: argparse.ArgumentParser = get_parser()
+    args: argparse.Namespace = parser.parse_args(
+        ["validate", "--input", "x.tsv", "--device", "cuda:1"]
+    )
+    assert args.device == "cuda:1"
 
 
 def test_local_cpu_profile_disables_gpu() -> None:

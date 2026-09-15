@@ -5,13 +5,24 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 from dataclasses import (dataclass, field)
 from pathlib import Path
-from typing import (Any, Dict, List, Optional)
+from typing import (Any, Dict, List, Optional, Tuple)
 
 import yaml
 
 LOGGER: logging.Logger = logging.getLogger(__name__)
+
+
+class DeviceConfigError(RuntimeError):
+    """Raised when a requested device cannot be honoured.
+
+    Always raised for an unparseable spec, and — when the request was explicit
+    (a CLI flag rather than a YAML preference list) — for a CUDA device that is
+    unavailable or out of range. A silent CPU fallback on a ten-day corpus is a
+    far worse outcome than an abort.
+    """
 
 
 @dataclass(frozen=True)
@@ -36,6 +47,7 @@ class ModelConfig:
 
 @dataclass(frozen=True)
 class DeviceConfig:
+    # Entries are 'cpu', 'mps', 'cuda' or 'cuda:N'; see resolve_device.
     prefer: List[str]
     cuda_index: int
     allow_mps: bool
@@ -191,19 +203,47 @@ def load_config(
     )
 
 
-def resolve_device(cfg: DeviceConfig) -> str:
+def resolve_device(cfg: DeviceConfig, explicit: bool = False) -> str:
     """Pick a torch device string by walking ``prefer`` in order.
 
-    MPS is skipped unless explicitly opted in: Whisper on Apple MPS tends to fail
-    outright for RNN-T rather than degrade gracefully, so a silent selection
-    would turn a local smoke test into a confusing crash.
+    Each entry is ``cpu``, ``mps``, ``cuda`` or ``cuda:N``. A bare ``cuda`` uses
+    ``cfg.cuda_index``; an explicit ``cuda:N`` overrides it.
+
+    MPS is skipped unless explicitly opted in: Whisper generation on Apple MPS is
+    slow and historically flaky, so a silent selection would turn a local smoke
+    test into a confusing hang.
+
+    ``explicit`` marks a device the user named on the command line. Such a
+    request never degrades to CPU — it raises :class:`DeviceConfigError` instead,
+    because a ten-day run that silently crawls on CPU is the failure this whole
+    function exists to prevent. A YAML ``prefer`` list keeps the soft fallback.
     """
     for candidate in cfg.prefer:
-        name: str = candidate.lower()
-        if name == "cuda" and _cuda_available():
-            return f"cuda:{cfg.cuda_index}"
-        if name == "mps":
+        kind: str
+        index: Optional[int]
+        kind, index = _parse_device_spec(candidate)
+
+        if kind == "cuda":
+            resolved: int = cfg.cuda_index if index is None else index
+            if _cuda_available():
+                _check_cuda_index(resolved, candidate)
+                return f"cuda:{resolved}"
+            if explicit:
+                raise DeviceConfigError(
+                    f"device {candidate!r} was requested explicitly but CUDA is "
+                    "unavailable. Check `nvidia-smi`, or drop the flag to fall "
+                    "back to CPU."
+                )
+            LOGGER.warning("cuda requested but unavailable; trying the next preference")
+            continue
+
+        if kind == "mps":
             if not cfg.allow_mps:
+                if explicit:
+                    raise DeviceConfigError(
+                        "device 'mps' was requested explicitly but allow_mps is "
+                        "false. Set device.allow_mps: true to opt in."
+                    )
                 LOGGER.warning(
                     "device 'mps' requested but allow_mps is false; skipping "
                     "(Whisper generation on MPS is slow and historically flaky)"
@@ -211,10 +251,79 @@ def resolve_device(cfg: DeviceConfig) -> str:
                 continue
             if _mps_available():
                 return "mps"
-        if name == "cpu":
+            if explicit:
+                raise DeviceConfigError(
+                    "device 'mps' was requested explicitly but MPS is unavailable."
+                )
+            continue
+
+        if kind == "cpu":
             return "cpu"
+
+    if explicit:
+        raise DeviceConfigError(
+            f"none of the requested devices are available: {list(cfg.prefer)!r}"
+        )
     LOGGER.warning("no preferred device available; falling back to cpu")
     return "cpu"
+
+
+def _parse_device_spec(spec: str) -> Tuple[str, Optional[int]]:
+    """Split a device spec into its kind and optional index.
+
+    Accepts ``cpu``, ``mps``, ``cuda`` and ``cuda:N`` (case-insensitive).
+    Anything else raises: before this existed, an unmatched spec fell through
+    every branch and landed on the CPU fallback, so ``--device cuda:1`` — and
+    even ``--device cuda:0`` — silently ran the whole corpus on CPU.
+    """
+    name: str = spec.strip().lower()
+    if name in {"cpu", "mps", "cuda"}:
+        return (name, None)
+
+    head, sep, tail = name.partition(":")
+    if head == "cuda" and sep and tail.isdigit():
+        return ("cuda", int(tail))
+
+    raise DeviceConfigError(
+        f"unsupported device spec {spec!r}; expected one of "
+        "'cpu', 'mps', 'cuda' or 'cuda:N'"
+    )
+
+
+def _check_cuda_index(index: int, spec: str) -> None:
+    """Validate a CUDA index against the visible device count.
+
+    Caught here with a legible message rather than deep inside ``.to(device)``.
+    ``CUDA_VISIBLE_DEVICES`` renumbers devices — under a mask of ``1`` the only
+    visible GPU is ``cuda:0`` — so an index past the count usually means the two
+    mechanisms were combined by mistake, and the message says so.
+    """
+    count: int = _cuda_device_count()
+    if count and index >= count:
+        mask: Optional[str] = os.environ.get("CUDA_VISIBLE_DEVICES")
+        hint: str = ""
+        if mask:
+            hint = (
+                f" CUDA_VISIBLE_DEVICES={mask!r} is set, which renumbers devices: "
+                "the visible GPUs are always 0..N-1 regardless of their physical "
+                "index, so combining it with a cuda index is usually a mistake."
+            )
+        raise DeviceConfigError(
+            f"device {spec!r} requested but only {count} CUDA device(s) are "
+            f"visible (valid indices 0..{count - 1}).{hint}"
+        )
+
+
+def _cuda_device_count() -> int:
+    """Visible CUDA device count, or 0 when torch cannot report one."""
+    try:
+        import torch
+    except (ImportError, OSError):
+        return 0
+    try:
+        return int(torch.cuda.device_count())
+    except Exception:  # noqa: BLE001 - a broken driver must not mask the real error
+        return 0
 
 
 def _cuda_available() -> bool:

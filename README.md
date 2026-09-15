@@ -146,7 +146,25 @@ rather than continuing.
 | `status` | Report resume progress without attaching to the running process |
 
 Useful flags: `--limit N`, `--dry-run`, `--no-resume`, `--force-resume`, `--batch-size`,
-`--device`, `--low-memory`. CLI flags override YAML.
+`--device`, `--cuda-index`, `--low-memory`. CLI flags override YAML.
+
+### Choosing a GPU
+
+`--device` takes `cpu`, `mps`, `cuda` or `cuda:N`; `--cuda-index N` sets the GPU index on its
+own, leaving the YAML preference list intact. Both are available on every subcommand, so
+`validate` previews the choice without loading the model:
+
+```bash
+./setup_and_run.sh validate --input train.tsv --device cuda:1   # which GPU would be used?
+./setup_and_run.sh transcribe --input train.tsv --cuda-index 1
+```
+
+A device named on the command line is **never** silently downgraded: if that GPU is missing or
+the index is out of range, the run aborts instead of spending days on CPU. A YAML `prefer` list
+keeps the soft fallback, so `["cuda", "cpu"]` still degrades gracefully on a CPU-only box.
+
+Note that `CUDA_VISIBLE_DEVICES` renumbers devices — under a mask of `1` the only visible GPU is
+`cuda:0`. Set the mask or the index, not both.
 
 ## Configuration
 
@@ -156,8 +174,8 @@ Useful flags: `--limit N`, `--dry-run`, `--no-resume`, `--force-resume`, `--batc
 | `configs/vps_h100.yaml` | Production run — CUDA index 0, 12 IO workers |
 | `configs/local_cpu.yaml` | Laptop smoke tests — CPU, batch size 2 |
 
-MPS stays off by default: NeMo RNN-T on Apple MPS tends to fail outright rather than degrade,
-so it requires an explicit `allow_mps: true`.
+MPS stays off by default: Whisper generation on Apple MPS is slow and historically flaky, so it
+requires an explicit `allow_mps: true`.
 
 ## Long runs
 

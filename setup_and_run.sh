@@ -209,6 +209,10 @@ main() {
   fi
 
   # GPU index 1 is fully occupied on the VPS; belt-and-braces with the config.
+  # Respects a pre-set value, so `CUDA_VISIBLE_DEVICES=1 ./setup_and_run.sh ...`
+  # works. Note that masking *renumbers* devices: under a mask the visible GPUs
+  # are always 0..N-1, so pair the mask with cuda_index 0 (or use --cuda-index
+  # on its own and leave the mask alone) — never both pointing at index 1.
   export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 
   if [[ "$setup_only" -eq 1 ]]; then

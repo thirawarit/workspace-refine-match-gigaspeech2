@@ -20,9 +20,16 @@ model:
   sampling_rate: 16000
 
 device:
-  # Walked in order. 'mps' is ignored unless allow_mps is true.
+  # Walked in order. Entries are 'cpu', 'mps', 'cuda' or 'cuda:N'.
+  # A bare 'cuda' uses cuda_index below; 'cuda:N' overrides it.
+  # 'mps' is ignored unless allow_mps is true.
   prefer: ["cuda", "cpu"]
-  # GPU index 1 is fully occupied on the VPS; pin to 0.
+  # Which GPU to use. GPU index 1 is fully occupied on the VPS; pin to 0.
+  # Override per-run with --cuda-index N or --device cuda:N.
+  #
+  # NOTE: CUDA_VISIBLE_DEVICES (exported by setup_and_run.sh) *renumbers*
+  # devices — under a mask of "1" the only visible GPU is cuda:0, not cuda:1.
+  # Set one or the other, not both.
   cuda_index: 0
   allow_mps: false
 

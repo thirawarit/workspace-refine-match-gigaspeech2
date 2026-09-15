@@ -10,7 +10,7 @@ from typing import (Any, Dict, List, Optional)
 
 from .checkpoint import (CheckpointMismatchError, CheckpointStore)
 from .combine import (CombineStats, combine, combine_low_memory)
-from .config import (AppConfig, load_config, resolve_device)
+from .config import (AppConfig, DeviceConfigError, load_config, resolve_device)
 from .io_formats import (detect_format, predicted_output_path)
 from .inference import (InferenceStats, run_inference)
 from .logging_utils import (get_logger, setup_logging)
@@ -39,6 +39,12 @@ def get_parser() -> argparse.ArgumentParser:
         target.add_argument("--log-level", type=str, default=None,
                             choices=["DEBUG", "INFO", "WARNING", "ERROR"],
                             help="override runtime.log_level")
+        # On every subcommand, so `validate` can preview a device choice without
+        # editing YAML — it already reports the resolved device.
+        target.add_argument("--device", type=str, default=None,
+                            help="override device preference: cpu, mps, cuda or cuda:N")
+        target.add_argument("--cuda-index", type=int, default=None,
+                            help="override device.cuda_index (the GPU to use)")
 
     transcribe = subparsers.add_parser("transcribe", help="run ASR over an input file")
     add_common(transcribe)
@@ -53,8 +59,6 @@ def get_parser() -> argparse.ArgumentParser:
                             help="resume even if the input no longer matches the checkpoint")
     transcribe.add_argument("--batch-size", type=int, default=None,
                             help="override batch.batch_size")
-    transcribe.add_argument("--device", type=str, default=None,
-                            help="override device preference, e.g. cuda/cpu/mps")
 
     combine_parser = subparsers.add_parser("combine", help="join input with predictions")
     add_common(combine_parser)
@@ -75,7 +79,6 @@ def get_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--no-resume", action="store_true")
     run_parser.add_argument("--force-resume", action="store_true")
     run_parser.add_argument("--batch-size", type=int, default=None)
-    run_parser.add_argument("--device", type=str, default=None)
     run_parser.add_argument("--low-memory", action="store_true")
 
     validate = subparsers.add_parser("validate", help="check config and audio paths")
@@ -102,11 +105,31 @@ def _overrides_from_args(args: argparse.Namespace) -> Dict[str, Any]:
 
     if getattr(args, "batch_size", None) is not None:
         overrides["batch"] = {"batch_size": args.batch_size}
+
+    # --device and --cuda-index are independent; merge rather than replace so
+    # `--cuda-index 1` alone still honours the YAML prefer list.
+    device: Dict[str, Any] = {}
     if getattr(args, "device", None) is not None:
-        overrides["device"] = {"prefer": [args.device]}
+        device["prefer"] = [args.device]
+    if getattr(args, "cuda_index", None) is not None:
+        device["cuda_index"] = args.cuda_index
+    if device:
+        overrides["device"] = device
+
     if getattr(args, "log_level", None) is not None:
         overrides["runtime"] = {"log_level": args.log_level}
     return overrides
+
+
+def _device_is_explicit(args: argparse.Namespace) -> bool:
+    """True when the user named a device on the command line.
+
+    An explicit request must abort rather than quietly fall back to CPU.
+    """
+    return (
+        getattr(args, "device", None) is not None
+        or getattr(args, "cuda_index", None) is not None
+    )
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -141,6 +164,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     except CheckpointMismatchError as exc:
         LOGGER.error("%s", exc)
         return 3
+    except DeviceConfigError as exc:
+        LOGGER.error("%s", exc)
+        return 4
     except KeyboardInterrupt:
         LOGGER.warning("interrupted; checkpoints are durable, re-run to resume")
         return 130
@@ -157,6 +183,7 @@ def _cmd_transcribe(args: argparse.Namespace, cfg: AppConfig) -> int:
         dry_run=getattr(args, "dry_run", False),
         resume=not getattr(args, "no_resume", False),
         force_resume=getattr(args, "force_resume", False),
+        device_explicit=_device_is_explicit(args),
     )
     return 0 if stats.failed == 0 or stats.succeeded > 0 else 1
 
@@ -191,7 +218,8 @@ def _cmd_validate(args: argparse.Namespace, cfg: AppConfig) -> int:
     LOGGER.info("config=%s", args.config)
     LOGGER.info("audio_root=%s (exists=%s)",
                 cfg.paths.audio_root, cfg.paths.audio_root.exists())
-    LOGGER.info("device would be: %s", resolve_device(cfg.device))
+    LOGGER.info("device would be: %s",
+                resolve_device(cfg.device, explicit=_device_is_explicit(args)))
     LOGGER.info("input format: %s", detect_format(args.input))
 
     stats: InferenceStats = run_inference(
