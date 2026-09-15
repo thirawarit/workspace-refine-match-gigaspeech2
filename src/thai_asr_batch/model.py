@@ -27,6 +27,28 @@ class ModelLoadError(RuntimeError):
     """Raised when the model or its dependencies cannot be prepared."""
 
 
+def _build_processor(
+    source: str,
+    processor_cls: Any,
+    feature_extractor_cls: Any,
+    tokenizer_cls: Any,
+) -> Any:
+    """Build a WhisperProcessor from its two components.
+
+    ``WhisperProcessor.from_pretrained`` cannot be used with this repo. It ships
+    a ``processor_config.json``, which transformers reads into ``kwargs`` while
+    *also* building ``feature_extractor`` positionally from
+    ``preprocessor_config.json`` — so the argument arrives twice and raises
+    ``__init__() got multiple values for argument 'feature_extractor'``.
+
+    Loading the two components separately bypasses that path and is stable
+    across versions, since both have plain ``from_pretrained`` classmethods.
+    """
+    feature_extractor: Any = feature_extractor_cls.from_pretrained(source)
+    tokenizer: Any = tokenizer_cls.from_pretrained(source)
+    return processor_cls(feature_extractor=feature_extractor, tokenizer=tokenizer)
+
+
 def _resolve_dtype(name: str) -> Any:
     """Map a config dtype string to a torch dtype."""
     import torch
@@ -63,8 +85,9 @@ class AsrModelWrapper:
             return
 
         try:
-            from transformers import (WhisperForConditionalGeneration,
-                                      WhisperProcessor)
+            from transformers import (WhisperFeatureExtractor,
+                                      WhisperForConditionalGeneration,
+                                      WhisperProcessor, WhisperTokenizer)
         except ImportError as exc:
             raise ModelLoadError(f"could not import transformers. {TRANSFORMERS_HELP}") from exc
         except OSError as exc:
@@ -85,16 +108,23 @@ class AsrModelWrapper:
 
         try:
             dtype: Any = _resolve_dtype(self.cfg.dtype)
-            processor: Any = WhisperProcessor.from_pretrained(source)
+            processor: Any = _build_processor(
+                source, WhisperProcessor, WhisperFeatureExtractor, WhisperTokenizer
+            )
+            # NOTE: the parameter is `torch_dtype`, not `dtype`. A `dtype=` kwarg
+            # is silently absorbed by **kwargs and the model loads in float32.
             model: Any = WhisperForConditionalGeneration.from_pretrained(
-                source, dtype=dtype
+                source, torch_dtype=dtype
             )
         except ModelLoadError:
             raise
         except Exception as exc:  # noqa: BLE001 - surface any load failure with context
             raise ModelLoadError(
-                f"could not load {source}: {exc}. If the repo is gated, set HF_TOKEN. "
-                "A truncated download also presents this way — check disk space."
+                f"could not load {source}: {type(exc).__name__}: {exc}\n"
+                "Common causes, in rough order of likelihood:\n"
+                "  - transformers version mismatch with the repo's config files\n"
+                "  - the repo is gated and HF_TOKEN is unset (see .env.example)\n"
+                "  - a truncated download from a full disk (check `df -h`)"
             ) from exc
 
         model = model.to(self.device)
