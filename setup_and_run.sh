@@ -102,11 +102,56 @@ install_nemo() {
   uv pip install -e "${NEMO_ROOT}[${NEMO_EXTRAS}]"
 }
 
+export_cuda_library_path() {
+  # The nvidia-* wheels ship their shared objects under
+  #   <site-packages>/nvidia/<component>/lib/
+  # but nothing adds those directories to the dynamic loader's search path. The
+  # symptom is an import that dies with e.g.
+  #   libcudnn.so.9: cannot open shared object file
+  # even though `uv pip list` shows nvidia-cudnn-cu13 installed.
+  #
+  # Discover the directories at runtime rather than hardcoding versions, so this
+  # keeps working when the wheels are upgraded.
+  local site_packages
+  site_packages="$(uv run --no-sync python -c \
+    'import sysconfig; print(sysconfig.get_paths()["purelib"])' 2>/dev/null)" || return 0
+  [[ -d "${site_packages}/nvidia" ]] || return 0
+
+  local cuda_libs=""
+  local lib_dir
+  while IFS= read -r lib_dir; do
+    cuda_libs="${cuda_libs:+${cuda_libs}:}${lib_dir}"
+  done < <(find "${site_packages}/nvidia" -maxdepth 2 -type d -name lib 2>/dev/null | sort)
+
+  if [[ -n "$cuda_libs" ]]; then
+    export LD_LIBRARY_PATH="${cuda_libs}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+    log "added $(tr ':' '\n' <<<"$cuda_libs" | wc -l | tr -d ' ') nvidia wheel lib dir(s) to LD_LIBRARY_PATH"
+  fi
+}
+
 verify_environment() {
   command -v ffmpeg >/dev/null 2>&1 \
     || log "WARNING: ffmpeg not found; only needed for non-conforming audio"
   uv run --no-sync python - <<'PY' || die "NeMo import failed; see the message above"
 import sys
+
+try:
+    import torch  # noqa: F401
+except OSError as exc:
+    # Native library failure, not a missing Python package.
+    print(
+        f"torch failed to load a shared library: {exc}\n"
+        "The nvidia-* wheels are installed but their .so files are not on the\n"
+        "loader path. setup_and_run.sh exports LD_LIBRARY_PATH for this; if you\n"
+        "are invoking python directly, export it yourself:\n"
+        "  export LD_LIBRARY_PATH=\"$(uv run --no-sync python -c "
+        "'import sysconfig,glob,os;"
+        "p=sysconfig.get_paths()[\\\"purelib\\\"];"
+        "print(\\\":\\\".join(sorted(glob.glob(os.path.join(p,\\\"nvidia\\\",\\\"*\\\",\\\"lib\\\")))))')"
+        "${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}\"",
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
 
 try:
     import nemo.collections.asr  # noqa: F401
@@ -136,9 +181,13 @@ main() {
     verify_lockfile
     sync_environment
     ensure_nemo
+    export_cuda_library_path
     verify_environment
   else
     export NEMO_ROOT
+    # Still needed on a fast restart: the loader path is per-process, so a
+    # 10-day run resumed with --skip-setup would otherwise fail to find cuDNN.
+    export_cuda_library_path
     log "skipping setup (--skip-setup)"
   fi
 
