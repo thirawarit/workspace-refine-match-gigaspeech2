@@ -1,0 +1,25 @@
+# VPS profile: single usable H100 (index 0), 24 cores, 503 GB RAM, Python 3.12.
+# Merged over default.yaml.
+
+paths:
+  audio_root: "/data/gigaspeech2/th"
+  output_dir: "/data/gigaspeech2/predictions"
+  checkpoint_dir: "/data/gigaspeech2/checkpoints"
+  log_dir: "./logs"
+  scratch_dir: "/data/gigaspeech2/scratch"
+
+device:
+  prefer: ["cuda", "cpu"]
+  cuda_index: 0
+  allow_mps: false
+
+batch:
+  batch_size: 16
+  sort_buffer_size: 4096
+  max_batch_duration_seconds: 480.0
+
+runtime:
+  io_workers: 12          # of 24 cores; the rest stay free for the data loader
+  progress_every_n: 1000
+  max_consecutive_batch_failures: 5
+  log_level: "INFO"

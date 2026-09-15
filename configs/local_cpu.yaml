@@ -1,0 +1,32 @@
+# Local dev profile (Apple M4 Pro). Smoke tests only — not for real runs.
+# MPS stays off: NeMo RNN-T on MPS tends to fail outright rather than degrade.
+# Merged over default.yaml.
+
+paths:
+  audio_root: "./data/audio"
+  output_dir: "./data/predictions"
+  checkpoint_dir: "./data/checkpoints"
+  log_dir: "./logs"
+  scratch_dir: "./data/scratch"
+
+device:
+  prefer: ["cpu"]
+  cuda_index: 0
+  allow_mps: false
+
+batch:
+  batch_size: 2
+  sort_buffer_size: 64
+  max_batch_duration_seconds: 120.0
+
+checkpoint:
+  enabled: true
+  flush_every_n: 10
+  flush_every_seconds: 5.0
+  max_cached_shards: 2
+
+runtime:
+  io_workers: 4
+  progress_every_n: 20
+  max_consecutive_batch_failures: 3
+  log_level: "DEBUG"

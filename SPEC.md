@@ -60,12 +60,20 @@ as a no-op fast path for conforming files (§6.3).
 
 ## 4. Text normalization
 
-Both `pred_text` and `orig_text` are normalized to **Unicode NFC**.
+Both `pred_text` and `orig_text` are normalized to **Unicode NFKC**.
 
-This is non-negotiable for Thai. สระอำ encodes either as U+0E33 or as นิคหิต + สระอา; the two
-render identically but compare unequal byte-wise. Without NFC on both sides, correct predictions
-would be scored as errors. Beyond NFC the model output is left raw — further normalization is
-lossy and belongs in a separate, tunable scoring step.
+This is non-negotiable for Thai. สระอำ encodes either as U+0E33 or as นิคหิต + สระอา
+(U+0E4D U+0E32); the two render identically but compare unequal byte-wise. Without folding them,
+correct predictions would be scored as errors.
+
+**NFKC, not NFC.** U+0E33's decomposition is tagged `<compat>`, which the canonical forms ignore
+— NFC and NFD both leave *both* spellings untouched, so they never converge. Only NFKC maps
+ำ → ํา. This was verified empirically, not assumed, and `tests/test_records.py` pins it so the
+choice cannot be silently "simplified" back to NFC.
+
+NFKC is broader than NFC (it also folds full-width forms and ligatures), which is acceptable for
+text whose purpose is WER comparison. Beyond normalization the model output is left raw —
+further cleanup is lossy and belongs in a separate, tunable scoring step.
 
 ## 5. Environment
 
@@ -199,10 +207,10 @@ Predictions are the smaller side, so build the hash from predictions and stream 
 ~2–3 GB for 10M rows, comfortable against 503 GB. `--low-memory` offers a sort + merge-join for
 constrained hosts and should be the default if combine ever runs on the Mac.
 
-Missing predictions are written with empty `pred_text` and counted, keeping the combined file
-1:1 with the input for WER scoring; their ids go to `logs/missing-<stamp>.txt`. Extra
-predictions (present in predictions, absent from input) are counted and warned — they signal a
-checkpoint/input mismatch.
+Both text columns are NFKC-normalized on the way out (§4). Missing predictions are written with
+empty `pred_text` and counted, keeping the combined file 1:1 with the input for WER scoring;
+their ids go to `logs/missing-<stamp>.txt`. Extra predictions (present in predictions, absent
+from input) are counted and warned — they signal a checkpoint/input mismatch.
 
 ### 6.6 CLI
 
@@ -270,7 +278,7 @@ fixtures in git) and a `FakeAsrModel` returning deterministic text, raising on i
 | `records` | The `148-148801-11` path rule; malformed ids raise. |
 | `batching` | Item conservation over random durations; size and duration caps. |
 | `inference` | Resume skips completed; `--limit`; poison clip fails alone; consecutive-failure abort. |
-| `combine` | Shuffled order still joins; **NFC (สระอำ in both encodings compares equal)**; missing/extra accounting. |
+| `combine` | Shuffled order still joins; **NFKC (สระอำ in both spellings compares equal)**; missing/extra accounting. |
 | `cli`/`config` | `--dry-run` never constructs the model; MPS never chosen unless opted in. |
 
 ## 11. Execution ladder

@@ -1,0 +1,49 @@
+# Baseline configuration. Override per-host with vps_h100.yaml / local_cpu.yaml.
+
+paths:
+  # Audio files live at <audio_root>/train/<sid_idx0>/<sid_idx1>/<sid>.wav
+  audio_root: "./data/audio"
+  output_dir: "./data/predictions"
+  checkpoint_dir: "./data/checkpoints"
+  log_dir: "./logs"
+  scratch_dir: "./data/scratch"
+
+model:
+  hf_repo_id: "typhoon-ai/typhoon-asr-streaming-nemotron-0.6b"
+  nemo_filename: "typhoon-asr-streaming-nemotron-0.6b.nemo"
+  # Set to skip the HuggingFace download and use a local checkpoint.
+  local_model_path: null
+  target_lang: "th-TH"
+  strip_lang_tags: true
+
+device:
+  # Walked in order. 'mps' is ignored unless allow_mps is true.
+  prefer: ["cuda", "cpu"]
+  # GPU index 1 is fully occupied on the VPS; pin to 0.
+  cuda_index: 0
+  allow_mps: false
+
+batch:
+  batch_size: 16                    # per the model card
+  sort_buffer_size: 2048            # local length-bucketing window
+  max_batch_duration_seconds: 480.0 # caps activation memory on long-clip windows
+
+audio:
+  target_sample_rate: 16000
+  mono: true
+  # Defensive: conforming files take a no-op fast path (header read only).
+  resample_on_the_fly: true
+  ffmpeg_binary: "ffmpeg"
+  ffmpeg_timeout_seconds: 60.0
+
+checkpoint:
+  enabled: true
+  flush_every_n: 200
+  flush_every_seconds: 30.0
+  max_cached_shards: 4              # LRU bound on in-memory done-sets
+
+runtime:
+  io_workers: 8
+  progress_every_n: 500
+  max_consecutive_batch_failures: 5 # abort rather than write empty rows for hours
+  log_level: "INFO"
