@@ -218,6 +218,16 @@ def resolve_device(cfg: DeviceConfig, explicit: bool = False) -> str:
     because a ten-day run that silently crawls on CPU is the failure this whole
     function exists to prevent. A YAML ``prefer`` list keeps the soft fallback.
     """
+    def unavailable(reason: str) -> None:
+        """Reject an explicit request, or note it and move on.
+
+        The explicit/implicit split is the whole policy of this function, so it
+        lives in one place rather than being re-spelled at each skip point.
+        """
+        if explicit:
+            raise DeviceConfigError(reason)
+        LOGGER.warning("%s; trying the next preference", reason)
+
     for candidate in cfg.prefer:
         kind: str
         index: Optional[int]
@@ -228,34 +238,24 @@ def resolve_device(cfg: DeviceConfig, explicit: bool = False) -> str:
             if _cuda_available():
                 _check_cuda_index(resolved, candidate)
                 return f"cuda:{resolved}"
-            if explicit:
-                raise DeviceConfigError(
-                    f"device {candidate!r} was requested explicitly but CUDA is "
-                    "unavailable. Check `nvidia-smi`, or drop the flag to fall "
-                    "back to CPU."
-                )
-            LOGGER.warning("cuda requested but unavailable; trying the next preference")
+            unavailable(
+                f"device {candidate!r} was requested but CUDA is unavailable "
+                "(check `nvidia-smi`)"
+            )
             continue
 
         if kind == "mps":
             if not cfg.allow_mps:
-                if explicit:
-                    raise DeviceConfigError(
-                        "device 'mps' was requested explicitly but allow_mps is "
-                        "false. Set device.allow_mps: true to opt in."
-                    )
-                LOGGER.warning(
-                    "device 'mps' requested but allow_mps is false; skipping "
-                    "(Whisper generation on MPS is slow and historically flaky)"
+                unavailable(
+                    "device 'mps' was requested but allow_mps is false — Whisper "
+                    "generation on MPS is slow and historically flaky, so it needs "
+                    "an explicit device.allow_mps: true"
                 )
                 continue
-            if _mps_available():
-                return "mps"
-            if explicit:
-                raise DeviceConfigError(
-                    "device 'mps' was requested explicitly but MPS is unavailable."
-                )
-            continue
+            if not _mps_available():
+                unavailable("device 'mps' was requested but MPS is unavailable")
+                continue
+            return "mps"
 
         if kind == "cpu":
             return "cpu"
