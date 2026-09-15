@@ -22,6 +22,8 @@ readonly NEMO_COMMIT="907edfd"
 readonly NEMO_REPO="https://github.com/NVIDIA/NeMo"
 
 NEMO_ROOT="${NEMO_ROOT:-${REPO_DIR}/NeMo}"
+# cu13 matches the VPS (CUDA 13.0); use asr,cu12 or plain asr elsewhere.
+NEMO_EXTRAS="${NEMO_EXTRAS:-asr,cu13}"
 
 log() { printf '%s | %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >&2; }
 die() { log "ERROR: $*"; exit 1; }
@@ -65,31 +67,63 @@ ensure_nemo() {
     if [[ "$head" != ${NEMO_COMMIT}* ]]; then
       die "NeMo at ${NEMO_ROOT} is at ${head:0:7}, expected ${NEMO_COMMIT}.
 This is the most likely cause of a missing EncDecRNNTBPEModelWithPrompt.
-Fix: git -C '${NEMO_ROOT}' checkout ${NEMO_COMMIT} && uv pip install -e '${NEMO_ROOT}'"
+Fix: git -C '${NEMO_ROOT}' checkout ${NEMO_COMMIT} && uv pip install -e '${NEMO_ROOT}[${NEMO_EXTRAS}]'"
     fi
     log "NeMo present at pinned commit ${NEMO_COMMIT}"
+    # Re-run even when the clone exists: an earlier bare `-e` install (without
+    # the extra) leaves the venv importable but missing hydra/omegaconf.
+    if ! uv run --no-sync python -c "import hydra, omegaconf, lightning" >/dev/null 2>&1; then
+      log "NeMo present but its [asr] dependencies are missing; reinstalling"
+      install_nemo
+    fi
   else
     log "cloning NeMo into ${NEMO_ROOT} (this takes a while)"
     git clone --quiet "$NEMO_REPO" "$NEMO_ROOT"
     git -C "$NEMO_ROOT" checkout --quiet "$NEMO_COMMIT"
-    log "installing NeMo from source into the uv venv"
-    # The one place `uv pip` is correct: NeMo cannot be expressed in uv.lock,
-    # so it is installed into the synced venv rather than declared as a dep.
-    uv pip install -e "$NEMO_ROOT"
+    install_nemo
   fi
   export NEMO_ROOT
+}
+
+install_nemo() {
+  # The [asr] extra is REQUIRED, not optional. A bare `-e "$NEMO_ROOT"` installs
+  # nemo-toolkit's base dependencies only, which omit hydra-core, omegaconf and
+  # lightning — the import then dies with "No module named 'hydra'".
+  #
+  # At 907edfd these live in [project.optional-dependencies].asr in NeMo's own
+  # pyproject.toml; that commit has no requirements/*.txt files at all.
+  # Note: the `asr-only` extra does NOT include hydra — it must be `asr`.
+  #
+  # cu13 adds numba-cuda[cu13] + cuda-python>=13,<14 to match the VPS's CUDA
+  # 13.0. Override for a CUDA 12 host or a CPU-only box:
+  #   NEMO_EXTRAS=asr,cu12 ./setup_and_run.sh --setup-only
+  #   NEMO_EXTRAS=asr      ./setup_and_run.sh --setup-only
+  log "installing NeMo with extras [${NEMO_EXTRAS}] into the uv venv"
+  uv pip install -e "${NEMO_ROOT}[${NEMO_EXTRAS}]"
 }
 
 verify_environment() {
   command -v ffmpeg >/dev/null 2>&1 \
     || log "WARNING: ffmpeg not found; only needed for non-conforming audio"
-  uv run python - <<'PY' || die "NeMo import failed; see the message above"
+  uv run --no-sync python - <<'PY' || die "NeMo import failed; see the message above"
 import sys
+
 try:
     import nemo.collections.asr  # noqa: F401
+except ModuleNotFoundError as exc:
+    # Almost always a missing [asr] extra rather than a broken NeMo checkout.
+    print(
+        f"could not import nemo.collections.asr: {exc}\n"
+        "This usually means NeMo was installed without its [asr] extra.\n"
+        "Fix: uv pip install -e \"$NEMO_ROOT[$NEMO_EXTRAS]\"  (default extras: asr,cu13)",
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
 except Exception as exc:
     print(f"could not import nemo.collections.asr: {exc}", file=sys.stderr)
     raise SystemExit(1)
+
+from nemo.collections.asr.models import ASRModel  # noqa: F401
 print("nemo.collections.asr OK")
 PY
 }

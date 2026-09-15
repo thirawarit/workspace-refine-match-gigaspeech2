@@ -20,7 +20,19 @@
 #
 #     git clone https://github.com/NVIDIA/NeMo && cd NeMo
 #     git checkout 907edfd
-#     uv pip install -e .
+#     uv pip install -e '.[asr,cu13]'
 #     export NEMO_ROOT=/path/to/NeMo
+#
+# The [asr] extra is REQUIRED. A bare `-e .` installs only nemo-toolkit's base
+# dependencies, which omit hydra-core, omegaconf and lightning; the import then
+# fails with "No module named 'hydra'". At 907edfd those live in NeMo's own
+# [project.optional-dependencies].asr — that commit ships no requirements/*.txt
+# files. The `asr-only` extra is NOT a substitute: it excludes hydra.
+#
+# cu13 matches the VPS's CUDA 13.0 (numba-cuda[cu13], cuda-python>=13,<14).
+# Override with NEMO_EXTRAS=asr,cu12 or NEMO_EXTRAS=asr on other hosts.
+#
+# NeMo 907edfd also requires torch>=2.6.0, which is why this project's own
+# pyproject.toml/uv.lock pin torch that way rather than to an older release.
 #
 # `setup_and_run.sh` does all of the above and verifies the commit.

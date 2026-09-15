@@ -261,6 +261,18 @@ hand-editing `pyproject.toml`, since both bypass the lockfile and break reproduc
 `EncDecRNNTBPEModelWithPrompt`, which exists only in a source build at commit `907edfd`. It is
 therefore installed into the synced venv separately, after `uv sync`.
 
+Two constraints that commit imposes, both discovered the hard way:
+
+- **The `[asr]` extra is required.** A bare `uv pip install -e "$NEMO_ROOT"` installs only
+  nemo-toolkit's base dependencies, which omit `hydra-core`, `omegaconf` and `lightning`; the
+  import then fails with `No module named 'hydra'`. At `907edfd` these live in NeMo's own
+  `[project.optional-dependencies].asr` — that commit ships **no** `requirements/*.txt` files.
+  The `asr-only` extra is not a substitute; it excludes hydra. `cu13` is appended to match the
+  VPS's CUDA 13.0, overridable via `NEMO_EXTRAS`.
+- **`torch>=2.6.0`.** This project's lock pins torch accordingly. An earlier `torch==2.5.1` pin
+  (chosen before NeMo's constraint was known) would have made the NeMo install either fail to
+  resolve or silently upgrade torch out from under the lockfile.
+
 `setup_and_run.sh`:
 
 1. Verify `uv` is present.
