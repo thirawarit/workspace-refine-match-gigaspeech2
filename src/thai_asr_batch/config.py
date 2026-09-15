@@ -219,13 +219,25 @@ def _cuda_available() -> bool:
         import torch  # local import: torch is heavy and optional for dry runs
     except ImportError:
         return False
+    except OSError as exc:
+        # torch is installed but a native library will not load, e.g.
+        # "libcudnn.so.9: cannot open shared object file". Degrade to CPU rather
+        # than crash, so --dry-run and validate still work on a broken box.
+        LOGGER.warning(
+            "torch is installed but failed to load a shared library (%s); "
+            "treating CUDA as unavailable. The nvidia-* wheels may be partially "
+            "extracted or missing from LD_LIBRARY_PATH — "
+            "./setup_and_run.sh --setup-only repairs both.",
+            exc,
+        )
+        return False
     return bool(torch.cuda.is_available())
 
 
 def _mps_available() -> bool:
     try:
         import torch
-    except ImportError:
+    except (ImportError, OSError):
         return False
     backend: Any = getattr(torch.backends, "mps", None)
     return bool(backend is not None and backend.is_available())

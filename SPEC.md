@@ -98,13 +98,17 @@ Stock `nemo_toolkit` does **not** contain `EncDecRNNTBPEModelWithPrompt`, which 
 requires. NeMo must be built from source at pinned commit **`907edfd`**:
 
 ```bash
-git clone https://github.com/NVIDIA/NeMo && cd NeMo && git checkout 907edfd && pip install -e .
+git clone https://github.com/NVIDIA/NeMo && cd NeMo && git checkout 907edfd
+uv pip install -e '.[asr,cu13]'
 export NEMO_ROOT=/path/to/NeMo
 ```
 
-Not pip-resolvable, therefore deliberately **absent from `requirements.txt`** and handled by
-`setup_and_run.sh`. The README documents the rationale so a future reader does not "fix" it by
-adding a pip pin.
+Not resolvable through a lockfile, therefore deliberately **absent from `uv.lock`** and handled
+by `setup_and_run.sh` (§9). The README documents the rationale so a future reader does not "fix"
+it by adding a dependency pin.
+
+The `[asr]` extra is **required** — see §9 and §12; a bare `-e .` omits hydra and the import
+fails at runtime.
 
 ### 5.4 Model checkpoint
 
@@ -244,7 +248,8 @@ All hyperparameters, paths, and settings live in `configs/*.yaml` — never hard
   formatter, since the VPS is likely UTC).
 - `logs/log-[datetime].txt` per session; failed clips also to `logs/errors-<stamp>.jsonl`.
 - `get_parser()` builds the argparse parser.
-- Pinned `requirements.txt`.
+- Dependencies pinned in `pyproject.toml` with a committed `uv.lock` (§9); `requirements.txt`
+  survives only as a pointer stub.
 - Bash script for environment setup and running.
 
 ## 9. Dependency management and setup
@@ -278,7 +283,8 @@ Two constraints that commit imposes, both discovered the hard way:
 1. Verify `uv` is present.
 2. `uv lock --check` — abort if `pyproject.toml` and `uv.lock` have drifted.
 3. `uv sync --frozen` — install exactly the committed lockfile, no re-resolution.
-4. If `$NEMO_ROOT` unset/absent: clone NeMo, `git checkout 907edfd`, `uv pip install -e .`.
+4. If `$NEMO_ROOT` unset/absent: clone NeMo, `git checkout 907edfd`,
+   `uv pip install -e "$NEMO_ROOT[$NEMO_EXTRAS]"` (default extras `asr,cu13`).
    If present, verify `git rev-parse HEAD` starts with `907edfd` and abort on drift — the single
    most likely cause of a mysterious `EncDecRNNTBPEModelWithPrompt` failure.
 5. Export `NEMO_ROOT` and `CUDA_VISIBLE_DEVICES=0`.
@@ -326,6 +332,11 @@ fixtures in git) and a `FakeAsrModel` returning deterministic text, raising on i
 | Memory growth over 10 days | LRU-bounded shard sets; generator readers; no hypothesis accumulation. |
 | Disk fills | Startup size estimate; session-log rotation; `status` reports headroom. |
 | NeMo commit drift | Setup asserts `907edfd`; `load()` `hasattr`-guards each card-specific API. |
+| NeMo installed without `[asr]` | `NEMO_EXTRAS` defaults to `asr,cu13`; `ensure_nemo` reinstalls when hydra/omegaconf/lightning are absent. `asr-only` is **not** a substitute — it excludes hydra. |
+| torch below NeMo's floor | `pyproject.toml` pins `torch>=2.6.0`, which NeMo `907edfd` requires. Resolves to 2.14.0, as NeMo sets no upper bound. |
+| CUDA `.so` files off the loader path | `export_cuda_library_path` globs `<site-packages>/nvidia/*/lib` into `LD_LIBRARY_PATH`, on the `--skip-setup` path too (it is per-process). |
+| Partial wheel from a small or full `/tmp` | `TMPDIR`/`UV_CACHE_DIR` default into the repo; `prepare_temp_dirs` aborts below `MIN_FREE_MB`; `verify_cuda_libraries` checks for `libcudnn.so.9` itself, since a truncated wheel still reports as installed. |
+| torch importable but its libraries unloadable | `_cuda_available` catches `OSError` as well as `ImportError` and degrades to CPU with a warning, so `validate`/`--dry-run` still run on a broken box. |
 | Silent quality regression | Sample predictions logged at DEBUG; `status` reports empty-prediction rate, so an all-empty run is caught in hour 1, not day 10. |
 
 ## 13. Open risk

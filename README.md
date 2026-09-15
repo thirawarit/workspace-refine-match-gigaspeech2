@@ -87,15 +87,25 @@ uv pip install --force-reinstall --no-cache nvidia-cudnn-cu13
 
 ## The NeMo dependency
 
-**NeMo is deliberately not in `requirements.txt`.** Stock `nemo_toolkit` does not contain
-`EncDecRNNTBPEModelWithPrompt`, which this model requires. It must be built from source at
-pinned commit `907edfd`:
+**NeMo cannot live in `uv.lock`.** Stock `nemo_toolkit` does not contain
+`EncDecRNNTBPEModelWithPrompt`, which this model requires, so it is built from source at pinned
+commit `907edfd` and installed into the synced venv separately:
 
 ```bash
 git clone https://github.com/NVIDIA/NeMo && cd NeMo
-git checkout 907edfd && pip install -e .
+git checkout 907edfd && uv pip install -e '.[asr,cu13]'
 export NEMO_ROOT=/path/to/NeMo
 ```
+
+**The `[asr]` extra is required, not optional.** A bare `-e .` installs only nemo-toolkit's base
+dependencies, omitting `hydra-core`, `omegaconf` and `lightning`; the import then fails with
+`No module named 'hydra'`. At `907edfd` those live in NeMo's own
+`[project.optional-dependencies].asr` — that commit ships no `requirements/*.txt` files at all.
+The `asr-only` extra is **not** a substitute: it excludes hydra. `cu13` matches CUDA 13 hosts;
+use `cu12` elsewhere, or override with `NEMO_EXTRAS`.
+
+NeMo `907edfd` also requires `torch>=2.6.0`, which is why this project's `pyproject.toml` pins
+torch that way rather than to an older release.
 
 `setup_and_run.sh` does this automatically and verifies the commit on every run. A drifted
 checkout is the most likely cause of a mysterious missing-class error, so the script aborts

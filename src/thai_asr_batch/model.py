@@ -17,10 +17,16 @@ LOGGER: logging.Logger = logging.getLogger(__name__)
 
 PINNED_NEMO_COMMIT: str = "907edfd"
 NEMO_HELP: str = (
-    "Stock nemo_toolkit lacks EncDecRNNTBPEModelWithPrompt. Install NeMo from "
-    f"source at commit {PINNED_NEMO_COMMIT}: git clone "
-    "https://github.com/NVIDIA/NeMo && cd NeMo && git checkout "
-    f"{PINNED_NEMO_COMMIT} && pip install -e ."
+    "Stock nemo_toolkit lacks EncDecRNNTBPEModelWithPrompt. The supported fix is "
+    "./setup_and_run.sh --setup-only, which clones NeMo at the pinned commit, "
+    "installs the required extras, routes wheel unpacking off /tmp and puts the "
+    "CUDA libraries on the loader path.\n"
+    f"By hand: git clone https://github.com/NVIDIA/NeMo && cd NeMo && git checkout "
+    f"{PINNED_NEMO_COMMIT} && uv pip install -e '.[asr,cu13]'\n"
+    "The [asr] extra is REQUIRED: a bare `-e .` omits hydra-core, omegaconf and "
+    "lightning, and the import then fails with \"No module named 'hydra'\". "
+    "`asr-only` is not a substitute — it excludes hydra. Use cu12 in place of "
+    "cu13 on a CUDA 12 host."
 )
 
 
@@ -41,7 +47,8 @@ def resolve_model_file(cfg: ModelConfig) -> Path:
     except ImportError as exc:
         raise ModelLoadError(
             "huggingface_hub is required to download the checkpoint; "
-            "pip install -r requirements.txt"
+            "run `uv sync --frozen` (requirements.txt is only a pointer stub — "
+            "pyproject.toml and uv.lock are the source of truth)"
         ) from exc
 
     LOGGER.info("resolving %s from %s", cfg.nemo_filename, cfg.hf_repo_id)

@@ -124,9 +124,11 @@ def _is_oom(exc: BaseException) -> bool:
 
 
 def _empty_cuda_cache() -> None:
+    # OSError as well as ImportError: a partially extracted CUDA wheel leaves
+    # torch importable-looking but its shared libraries unloadable.
     try:
         import torch
-    except ImportError:
+    except (ImportError, OSError):
         return
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
