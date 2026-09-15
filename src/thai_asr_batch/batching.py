@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import (Dict, Iterable, Iterator, List, Sequence, Tuple)
+from typing import (Dict, Iterable, Iterator, List, Optional, Sequence, Set)
 
 from .config import BatchConfig
 from .model import AsrModelWrapper
@@ -27,6 +27,16 @@ class DeadContextError(RuntimeError):
     After a CUDA OOM the context can be left unusable, in which case per-item
     retry also fails and every subsequent batch silently yields empty text. A
     job that stops loudly beats one that writes empty rows for hours.
+    """
+
+
+class SystematicFailureError(RuntimeError):
+    """Raised when consecutive batches fail with an identical error.
+
+    Distinct from :class:`DeadContextError`: this is a misconfiguration that
+    will never succeed (a wrong language code, an unset tokenizer slot, a bad
+    checkpoint), so retrying 10M clips cannot help. Abort on the second such
+    batch rather than after the generic failure threshold.
     """
 
 
@@ -81,23 +91,51 @@ def _drain(buffer: List[WorkItem], cfg: BatchConfig) -> Iterator[List[WorkItem]]
         yield batch
 
 
+@dataclass(frozen=True)
+class BatchOutcome:
+    """Result of one batch, including a signature for systematic failures."""
+
+    succeeded: Dict[str, str]
+    failed: Dict[str, str]
+    whole_batch_failed: bool
+    # Set when the batch failed and every clip reported the SAME error. A
+    # misconfiguration (wrong lang, missing tokenizer slot) looks exactly like
+    # this and must not be mistaken for a run of unlucky clips.
+    systematic_error: Optional[str] = None
+
+
+def _error_signature(message: str) -> str:
+    """Collapse an exception message to something comparable across clips.
+
+    Paths and ids differ per clip, so compare only the leading text, which is
+    where a configuration error states its cause.
+    """
+    return " ".join(message.split())[:160]
+
+
 def transcribe_with_isolation(
     model: AsrModelWrapper,
     batch: Sequence[WorkItem],
-) -> Tuple[Dict[str, str], Dict[str, str], bool]:
+) -> BatchOutcome:
     """Transcribe a batch, isolating failures to the offending clip.
 
-    Returns ``(succeeded, failed, whole_batch_failed)``. On a batch-level
-    exception the batch is retried one item at a time so a single poison clip
-    does not void its ~15 healthy neighbours. The cost is one wasted pass per
-    bad clip, negligible against an expected ~1000 bad clips at 10M scale.
+    On a batch-level exception the batch is retried one item at a time so a
+    single poison clip does not void its ~15 healthy neighbours. The cost is one
+    wasted pass per bad clip, negligible against an expected ~1000 bad clips at
+    10M scale.
+
+    If every clip then fails with the *same* error, that is a systematic fault
+    rather than bad data, and it is reported as such so the caller can stop
+    immediately instead of grinding out empty predictions.
     """
     if not batch:
-        return {}, {}, False
+        return BatchOutcome({}, {}, False)
 
     try:
         texts: List[str] = model.transcribe_batch([item.audio_path for item in batch])
-        return {item.record.segment_id: text for item, text in zip(batch, texts)}, {}, False
+        return BatchOutcome(
+            {item.record.segment_id: text for item, text in zip(batch, texts)}, {}, False
+        )
     except Exception as exc:  # noqa: BLE001 - any failure falls back to per-item
         if _is_oom(exc):
             LOGGER.warning("CUDA OOM on batch of %d; clearing cache", len(batch))
@@ -115,7 +153,14 @@ def transcribe_with_isolation(
             failed[item.record.segment_id] = str(exc)
 
     whole_batch_failed: bool = not succeeded and bool(failed)
-    return succeeded, failed, whole_batch_failed
+
+    systematic: Optional[str] = None
+    if whole_batch_failed and len(failed) > 1:
+        signatures: Set[str] = {_error_signature(msg) for msg in failed.values()}
+        if len(signatures) == 1:
+            systematic = next(iter(signatures))
+
+    return BatchOutcome(succeeded, failed, whole_batch_failed, systematic)
 
 
 def _is_oom(exc: BaseException) -> bool:

@@ -11,8 +11,8 @@ from typing import (Iterable, Iterator, Optional)
 
 from .audio import (AudioError, AudioProbe, ensure_conforming, estimate_duration,
                     probe_audio)
-from .batching import (DeadContextError, WorkItem, bucketed_batches,
-                       transcribe_with_isolation)
+from .batching import (BatchOutcome, DeadContextError, SystematicFailureError,
+                       WorkItem, bucketed_batches, transcribe_with_isolation)
 from .checkpoint import CheckpointStore
 from .config import (AppConfig, resolve_device)
 from .io_formats import (Format, detect_format, open_reader, open_writer,
@@ -104,13 +104,38 @@ def run_inference(
 
     writer = open_writer(output_path, fmt, append=append)
     consecutive_failures: int = 0
+    last_systematic: Optional[str] = None
+    systematic_streak: int = 0
 
     try:
         prepared: Iterator[WorkItem] = _prepare_items(records, cfg, stats)
         for batch in bucketed_batches(prepared, cfg.batch):
-            succeeded, failed, whole_failed = transcribe_with_isolation(model, batch)
+            outcome: BatchOutcome = transcribe_with_isolation(model, batch)
+            succeeded = outcome.succeeded
+            failed = outcome.failed
 
-            if whole_failed:
+            # A misconfiguration fails every clip with the same message and will
+            # never succeed, so stop on the second such batch instead of
+            # grinding through the corpus writing empty predictions.
+            if outcome.systematic_error is not None:
+                if outcome.systematic_error == last_systematic:
+                    systematic_streak += 1
+                else:
+                    last_systematic = outcome.systematic_error
+                    systematic_streak = 1
+                if systematic_streak >= 2:
+                    raise SystematicFailureError(
+                        f"{systematic_streak} consecutive batches failed with an "
+                        f"identical error, so this is a configuration fault, not "
+                        f"bad audio:\n  {outcome.systematic_error}\n"
+                        "Nothing was written for these clips. Fix the cause and "
+                        "re-run; completed segments resume from the checkpoint."
+                    )
+            else:
+                last_systematic = None
+                systematic_streak = 0
+
+            if outcome.whole_batch_failed:
                 consecutive_failures += 1
                 if consecutive_failures >= cfg.runtime.max_consecutive_batch_failures:
                     raise DeadContextError(

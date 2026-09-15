@@ -82,10 +82,11 @@ def test_empty_input_yields_nothing() -> None:
 def test_healthy_batch_returns_all_predictions() -> None:
     model: FakeAsrModel = FakeAsrModel()
     batch: List[WorkItem] = [_item("1-1-0", 1.0), _item("1-1-1", 1.0)]
-    ok, failed, whole_failed = transcribe_with_isolation(model, batch)  # type: ignore[arg-type]
-    assert set(ok) == {"1-1-0", "1-1-1"}
-    assert not failed
-    assert not whole_failed
+    outcome = transcribe_with_isolation(model, batch)  # type: ignore[arg-type]
+    assert set(outcome.succeeded) == {"1-1-0", "1-1-1"}
+    assert not outcome.failed
+    assert not outcome.whole_batch_failed
+    assert outcome.systematic_error is None
 
 
 def test_one_poison_clip_does_not_void_its_neighbours() -> None:
@@ -96,20 +97,63 @@ def test_one_poison_clip_does_not_void_its_neighbours() -> None:
         _item("1-1-boom", 1.0),
         _item("1-1-2", 1.0),
     ]
-    ok, failed, whole_failed = transcribe_with_isolation(model, batch)  # type: ignore[arg-type]
-    assert set(ok) == {"1-1-0", "1-1-2"}
-    assert set(failed) == {"1-1-boom"}
-    assert not whole_failed
+    outcome = transcribe_with_isolation(model, batch)  # type: ignore[arg-type]
+    assert set(outcome.succeeded) == {"1-1-0", "1-1-2"}
+    assert set(outcome.failed) == {"1-1-boom"}
+    assert not outcome.whole_batch_failed
+    assert outcome.systematic_error is None
 
 
 def test_all_failing_batch_reports_whole_failure() -> None:
     """Signals a possibly dead CUDA context to the orchestrator."""
     model: FakeAsrModel = FakeAsrModel()
     batch: List[WorkItem] = [_item("1-1-boom", 1.0), _item("1-1-boom2", 1.0)]
-    ok, failed, whole_failed = transcribe_with_isolation(model, batch)  # type: ignore[arg-type]
-    assert not ok
-    assert len(failed) == 2
-    assert whole_failed
+    outcome = transcribe_with_isolation(model, batch)  # type: ignore[arg-type]
+    assert not outcome.succeeded
+    assert len(outcome.failed) == 2
+    assert outcome.whole_batch_failed
+
+
+def test_identical_errors_are_flagged_as_systematic() -> None:
+    """A misconfiguration fails every clip the same way — not bad audio.
+
+    Models the real case: "Expected 'lang' to be set for AggregateTokenizer."
+    on every clip regardless of input.
+    """
+
+    class MisconfiguredModel:
+        def transcribe_batch(self, audio_paths: List[Path]) -> List[str]:
+            raise RuntimeError("Expected 'lang' to be set for AggregateTokenizer.")
+
+    batch: List[WorkItem] = [_item("1-1-0", 1.0), _item("1-1-1", 1.0)]
+    outcome = transcribe_with_isolation(MisconfiguredModel(), batch)  # type: ignore[arg-type]
+    assert outcome.whole_batch_failed
+    assert outcome.systematic_error is not None
+    assert "AggregateTokenizer" in outcome.systematic_error
+
+
+def test_differing_errors_are_not_systematic() -> None:
+    """Distinct per-clip failures are bad data, and must not trip the abort."""
+
+    class FlakyModel:
+        def transcribe_batch(self, audio_paths: List[Path]) -> List[str]:
+            raise RuntimeError(f"corrupt frame in {audio_paths[0].stem}")
+
+    batch: List[WorkItem] = [_item("1-1-0", 1.0), _item("1-1-1", 1.0)]
+    outcome = transcribe_with_isolation(FlakyModel(), batch)  # type: ignore[arg-type]
+    assert outcome.whole_batch_failed
+    assert outcome.systematic_error is None
+
+
+def test_single_clip_batch_is_never_systematic() -> None:
+    """One failing clip is not evidence of a systematic fault."""
+
+    class MisconfiguredModel:
+        def transcribe_batch(self, audio_paths: List[Path]) -> List[str]:
+            raise RuntimeError("Expected 'lang' to be set for AggregateTokenizer.")
+
+    outcome = transcribe_with_isolation(MisconfiguredModel(), [_item("1-1-0", 1.0)])  # type: ignore[arg-type]
+    assert outcome.systematic_error is None
 
 
 def test_isolation_retries_individually() -> None:
@@ -123,4 +167,8 @@ def test_isolation_retries_individually() -> None:
 
 def test_empty_batch_is_a_noop() -> None:
     model: FakeAsrModel = FakeAsrModel()
-    assert transcribe_with_isolation(model, []) == ({}, {}, False)  # type: ignore[arg-type]
+    outcome = transcribe_with_isolation(model, [])  # type: ignore[arg-type]
+    assert not outcome.succeeded
+    assert not outcome.failed
+    assert not outcome.whole_batch_failed
+    assert outcome.systematic_error is None
