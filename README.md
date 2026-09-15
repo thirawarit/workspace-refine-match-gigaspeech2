@@ -49,6 +49,26 @@ identically but compare unequal. NFC does *not* fold them: U+0E33's decompositio
 `<compat>`, so NFC and NFD both leave either spelling alone. Only NFKC maps ำ → ํา. Without it,
 WER would count correct predictions as errors.
 
+## Secrets
+
+```bash
+cp .env.example .env
+chmod 600 .env
+# then edit .env and set HF_TOKEN=hf_...
+```
+
+`setup_and_run.sh` sources `.env` at startup and exports its contents, so the token reaches both
+`uv sync` and the run. `.env` is gitignored; `.env.example` is the committed template.
+
+`HF_TOKEN` is only required if the model repo is gated or private — a public repo downloads
+without it. Create one at <https://huggingface.co/settings/tokens>; read scope is sufficient.
+
+Running Python directly rather than through the script? Load it yourself first:
+
+```bash
+set -a && source .env && set +a
+```
+
 ## Install-time temp space
 
 Large CUDA wheels (torch, cuDNN, cuBLAS, NCCL) unpack to a temp directory before landing in the

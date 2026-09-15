@@ -60,6 +60,19 @@ readonly MIN_FREE_MB="${MIN_FREE_MB:-15000}"
 log() { printf '%s | %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >&2; }
 die() { log "ERROR: $*"; exit 1; }
 
+load_dotenv() {
+  # Secrets live in .env (gitignored); .env.example is the committed template.
+  # `set -a` exports every assignment so child processes inherit them.
+  local env_file="${REPO_DIR}/.env"
+  [[ -f "$env_file" ]] || return 0
+  set -a
+  # shellcheck disable=SC1090
+  source "$env_file"
+  set +a
+  # Never log the value itself.
+  log ".env loaded${HF_TOKEN:+ (HF_TOKEN set)}"
+}
+
 setup_only=0
 skip_setup=0
 args=()
@@ -176,6 +189,8 @@ PY
 
 main() {
   cd "$REPO_DIR"
+  # Before everything: the token may be needed by the very first download.
+  load_dotenv
   ensure_uv
 
   if [[ "$skip_setup" -eq 0 ]]; then
