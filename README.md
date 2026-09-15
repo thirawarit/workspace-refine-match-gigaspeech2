@@ -117,9 +117,26 @@ aborts instead of writing empty rows for hours.
 
 ## Development
 
+Dependencies are managed with [uv](https://docs.astral.sh/uv/) in **project mode**:
+`pyproject.toml` declares them, `uv.lock` pins the exact resolved versions, and both are
+committed. `.python-version` pins the interpreter to 3.12.
+
 ```bash
-python -m pytest tests/ -q
+uv sync                 # create/refresh .venv from the lockfile
+uv run pytest tests/ -q # run the suite
 ```
+
+Adding a dependency:
+
+```bash
+uv add <package>          # runtime
+uv add --dev <package>    # tests/tooling only
+uv lock --check           # verify the lock matches pyproject.toml before committing
+```
+
+Never use `uv pip install` or hand-edit `pyproject.toml` dependency entries — both bypass the
+lockfile and break reproducibility. The one exception is NeMo, which cannot be expressed in
+`uv.lock` at all (see above) and is installed from source by `setup_and_run.sh`.
 
 The suite needs **no GPU and no NeMo** — `import nemo` is deferred into `model.load()`, which
 the tests never reach. Fixtures generate real tiny WAVs via the stdlib `wave` module.

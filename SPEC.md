@@ -247,22 +247,34 @@ All hyperparameters, paths, and settings live in `configs/*.yaml` — never hard
 - Pinned `requirements.txt`.
 - Bash script for environment setup and running.
 
-## 9. Setup script
+## 9. Dependency management and setup
+
+Dependencies use **uv in project mode**, per the project's `uv-python-project-setup` skill:
+`pyproject.toml` declares them, `uv.lock` pins exact resolved versions, and both are committed.
+`.python-version` pins the interpreter to 3.12, which removes the need to probe for a `python3`
+on PATH (the local one is 3.9.6, not the 3.10.20 in SYSTEM.md).
+
+Dependencies are added only with `uv add` / `uv add --dev` — never `uv pip install`, never by
+hand-editing `pyproject.toml`, since both bypass the lockfile and break reproducibility.
+
+**NeMo is the sole exception.** It cannot be expressed in `uv.lock` at all: the model needs
+`EncDecRNNTBPEModelWithPrompt`, which exists only in a source build at commit `907edfd`. It is
+therefore installed into the synced venv separately, after `uv sync`.
 
 `setup_and_run.sh`:
 
-1. **Pin the interpreter** via `PYTHON_BIN` (default `python3.12`). Local `python3` is 3.9.6, so
-   trusting it would silently build a broken venv.
-2. Create/activate `.venv`; install `requirements.txt`.
-3. If `$NEMO_ROOT` unset/absent: clone NeMo, `git checkout 907edfd`, `pip install -e .`.
-   If present, verify `git rev-parse HEAD` starts with `907edfd` and abort on drift — this is
-   the single most likely cause of a mysterious `EncDecRNNTBPEModelWithPrompt` failure.
-4. Export `NEMO_ROOT` and `CUDA_VISIBLE_DEVICES=0`.
-5. Verify `ffmpeg -version`; import-check `nemo.collections.asr`.
-6. `exec python -m thai_asr_batch.cli "$@"`.
+1. Verify `uv` is present.
+2. `uv lock --check` — abort if `pyproject.toml` and `uv.lock` have drifted.
+3. `uv sync --frozen` — install exactly the committed lockfile, no re-resolution.
+4. If `$NEMO_ROOT` unset/absent: clone NeMo, `git checkout 907edfd`, `uv pip install -e .`.
+   If present, verify `git rev-parse HEAD` starts with `907edfd` and abort on drift — the single
+   most likely cause of a mysterious `EncDecRNNTBPEModelWithPrompt` failure.
+5. Export `NEMO_ROOT` and `CUDA_VISIBLE_DEVICES=0`.
+6. Verify `ffmpeg -version`; import-check `nemo.collections.asr`.
+7. `exec uv run --no-sync python -m thai_asr_batch.cli "$@"`.
 
-Flags `--setup-only` / `--skip-setup` (a 10-day run must not re-resolve pip on every restart).
-Idempotent and safe to re-run.
+Flags `--setup-only` / `--skip-setup`, and `uv run --no-sync` on the exec, so a 10-day run never
+stalls re-resolving dependencies on restart. Idempotent and safe to re-run.
 
 ## 10. Testing
 

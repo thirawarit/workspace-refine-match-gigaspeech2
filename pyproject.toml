@@ -4,18 +4,12 @@ version = "0.1.0"
 description = "Batch ASR inference over GigaSpeech2 Thai transcripts"
 requires-python = ">=3.10"
 dependencies = [
-    "torch==2.5.1",
     "huggingface-hub==0.26.2",
-    "PyYAML==6.0.2",
-    "soundfile==0.12.1",
     "numpy==1.26.4",
+    "pyyaml==6.0.2",
+    "soundfile==0.12.1",
+    "torch==2.5.1",
     "tqdm==4.67.1",
-]
-
-[project.optional-dependencies]
-dev = [
-    "pytest==8.3.4",
-    "pytest-mock==3.14.0",
 ]
 
 [project.scripts]
@@ -31,3 +25,9 @@ where = ["src"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+
+[dependency-groups]
+dev = [
+    "pytest==8.3.4",
+    "pytest-mock==3.14.0",
+]

@@ -2,9 +2,13 @@
 #
 # Environment setup + runner for the Thai ASR batch-inference pipeline.
 #
-# NeMo is NOT pip-installable for this model: stock nemo_toolkit lacks
-# EncDecRNNTBPEModelWithPrompt. It must be built from source at commit 907edfd,
-# which is why this script exists rather than a plain `pip install -r`.
+# Dependencies are managed with uv in project mode: pyproject.toml + uv.lock are
+# the source of truth, and `uv sync --frozen` installs exactly what is locked.
+#
+# NeMo is the one exception. It is NOT pip/uv-installable for this model: stock
+# nemo_toolkit lacks EncDecRNNTBPEModelWithPrompt, so it must be built from
+# source at commit 907edfd and is therefore installed into the uv venv
+# separately, after the sync.
 #
 # Usage:
 #   ./setup_and_run.sh --setup-only
@@ -17,11 +21,7 @@ readonly REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly NEMO_COMMIT="907edfd"
 readonly NEMO_REPO="https://github.com/NVIDIA/NeMo"
 
-# The local machine's `python3` is 3.9.6, which would silently build a broken
-# venv. Pin the interpreter explicitly; override with PYTHON_BIN=... .
-PYTHON_BIN="${PYTHON_BIN:-python3.12}"
 NEMO_ROOT="${NEMO_ROOT:-${REPO_DIR}/NeMo}"
-VENV_DIR="${VENV_DIR:-${REPO_DIR}/.venv}"
 
 log() { printf '%s | %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >&2; }
 die() { log "ERROR: $*"; exit 1; }
@@ -37,23 +37,25 @@ for arg in "$@"; do
   esac
 done
 
-ensure_python() {
-  command -v "$PYTHON_BIN" >/dev/null 2>&1 \
-    || die "interpreter '$PYTHON_BIN' not found; set PYTHON_BIN=<python3.x>"
-  log "using $("$PYTHON_BIN" --version 2>&1)"
+ensure_uv() {
+  command -v uv >/dev/null 2>&1 || die "uv not found. Install it:
+  curl -LsSf https://astral.sh/uv/install.sh | sh"
+  log "using uv $(uv --version)"
 }
 
-ensure_venv() {
-  if [[ ! -d "$VENV_DIR" ]]; then
-    log "creating venv at $VENV_DIR"
-    "$PYTHON_BIN" -m venv "$VENV_DIR"
-  fi
-  # shellcheck disable=SC1091
-  source "${VENV_DIR}/bin/activate"
-  log "installing pinned requirements"
-  python -m pip install --quiet --upgrade pip
-  python -m pip install --quiet -r "${REPO_DIR}/requirements.txt"
-  python -m pip install --quiet -e "${REPO_DIR}"
+sync_environment() {
+  # --frozen installs exactly the committed lockfile with no re-resolution.
+  # The Python version comes from .python-version, so the interpreter is
+  # consistent across machines without probing for a `python3` on PATH.
+  log "syncing locked dependencies"
+  uv sync --frozen
+}
+
+verify_lockfile() {
+  # Fails if pyproject.toml and uv.lock have drifted apart.
+  uv lock --check >/dev/null 2>&1 \
+    || die "uv.lock is out of date with pyproject.toml. Run: uv lock"
+  log "lockfile is current"
 }
 
 ensure_nemo() {
@@ -63,15 +65,17 @@ ensure_nemo() {
     if [[ "$head" != ${NEMO_COMMIT}* ]]; then
       die "NeMo at ${NEMO_ROOT} is at ${head:0:7}, expected ${NEMO_COMMIT}.
 This is the most likely cause of a missing EncDecRNNTBPEModelWithPrompt.
-Fix: git -C '${NEMO_ROOT}' checkout ${NEMO_COMMIT} && pip install -e '${NEMO_ROOT}'"
+Fix: git -C '${NEMO_ROOT}' checkout ${NEMO_COMMIT} && uv pip install -e '${NEMO_ROOT}'"
     fi
     log "NeMo present at pinned commit ${NEMO_COMMIT}"
   else
     log "cloning NeMo into ${NEMO_ROOT} (this takes a while)"
     git clone --quiet "$NEMO_REPO" "$NEMO_ROOT"
     git -C "$NEMO_ROOT" checkout --quiet "$NEMO_COMMIT"
-    log "installing NeMo (editable)"
-    python -m pip install --quiet -e "$NEMO_ROOT"
+    log "installing NeMo from source into the uv venv"
+    # The one place `uv pip` is correct: NeMo cannot be expressed in uv.lock,
+    # so it is installed into the synced venv rather than declared as a dep.
+    uv pip install -e "$NEMO_ROOT"
   fi
   export NEMO_ROOT
 }
@@ -79,7 +83,7 @@ Fix: git -C '${NEMO_ROOT}' checkout ${NEMO_COMMIT} && pip install -e '${NEMO_ROO
 verify_environment() {
   command -v ffmpeg >/dev/null 2>&1 \
     || log "WARNING: ffmpeg not found; only needed for non-conforming audio"
-  python - <<'PY' || die "NeMo import failed; see the message above"
+  uv run python - <<'PY' || die "NeMo import failed; see the message above"
 import sys
 try:
     import nemo.collections.asr  # noqa: F401
@@ -92,15 +96,14 @@ PY
 
 main() {
   cd "$REPO_DIR"
+  ensure_uv
 
   if [[ "$skip_setup" -eq 0 ]]; then
-    ensure_python
-    ensure_venv
+    verify_lockfile
+    sync_environment
     ensure_nemo
     verify_environment
   else
-    # shellcheck disable=SC1091
-    source "${VENV_DIR}/bin/activate"
     export NEMO_ROOT
     log "skipping setup (--skip-setup)"
   fi
@@ -114,8 +117,10 @@ main() {
   fi
 
   [[ ${#args[@]} -gt 0 ]] || die "no command given; try: $0 --help"
-  log "running: python -m thai_asr_batch.cli ${args[*]}"
-  exec python -m thai_asr_batch.cli "${args[@]}"
+  log "running: uv run thai-asr-batch ${args[*]}"
+  # --no-sync: the sync already happened above (or was deliberately skipped),
+  # so a long run never stalls re-resolving dependencies on restart.
+  exec uv run --no-sync python -m thai_asr_batch.cli "${args[@]}"
 }
 
 main "$@"
