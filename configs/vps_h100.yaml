@@ -2,11 +2,19 @@
 # Merged over default.yaml.
 
 paths:
-  audio_root: "/data/gigaspeech2/th"
-  output_dir: "/data/gigaspeech2/predictions"
-  checkpoint_dir: "/data/gigaspeech2/checkpoints"
+  # PARENT of train/, not train/ itself: records.py appends its own "train"
+  # segment, so "8-8888-3" resolves to
+  #   <audio_root>/train/8/8888/8-8888-3.wav
+  # Pointing this at .../th/train would build .../th/train/train/8/... and miss
+  # 100% of lookups — which looks correct at a glance and is not.
+  audio_root: "/home/my/path/datasets/gigaspeech2/data/th"
+  # Kept in-repo: that disk is known to exist and have room (the CUDA wheels
+  # already unpack there). Move these if a larger volume is available — ~9.5M
+  # predictions plus sharded checkpoints.
+  output_dir: "./data/predictions"
+  checkpoint_dir: "./data/checkpoints"
   log_dir: "./logs"
-  scratch_dir: "/data/gigaspeech2/scratch"
+  scratch_dir: "./data/scratch"
 
 device:
   prefer: ["cuda", "cpu"]

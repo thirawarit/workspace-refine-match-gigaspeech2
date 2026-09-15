@@ -29,7 +29,9 @@ train_refined.tsv                 segment_id <TAB> text          (headerless)
                               segment_id, orig_text, pred_text
 ```
 
-Audio paths are derived from the segment id:
+Audio paths are derived from the segment id. **`audio_root` is the parent of `train/`** — the
+pipeline appends the `train` segment itself, so pointing it at the `train/` directory builds
+`.../train/train/...` and finds nothing:
 
 ```
 148-148801-11  →  <audio_root>/train/148/148801/148-148801-11.wav

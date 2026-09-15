@@ -339,8 +339,33 @@ fixtures in git) and a `FakeAsrModel` returning deterministic text, raising on i
 | torch importable but its libraries unloadable | `_cuda_available` catches `OSError` as well as `ImportError` and degrades to CPU with a warning, so `validate`/`--dry-run` still run on a broken box. |
 | Silent quality regression | Sample predictions logged at DEBUG; `status` reports empty-prediction rate, so an all-empty run is caught in hour 1, not day 10. |
 
-## 13. Open risk
+## 13. Validated against real data
 
-The data and GPU live on the VPS; this workspace is empty, so **the audio path rule and field
-names have not been validated against real files**. Ladder step 1 (`validate`) exists precisely
-to catch that before GPU time is spent.
+The audio path rule and field names were open risks during design; ladder step 1 (`validate`)
+resolved both against the real corpus.
+
+**Field names** — a full scan parsed all **9,557,264** rows with zero failures, confirming the
+headerless two-column shape.
+
+**Path rule** — confirmed byte-for-byte against the VPS tree:
+
+```
+segment_id "8-8888-3"  ->  <audio_root>/train/8/8888/8-8888-3.wav
+```
+
+**`audio_root` is the PARENT of `train/`.** `records.py` appends its own `train` segment
+(`AUDIO_SUBDIR`, `records.py:14`), so the corpus at
+`/home/my/path/datasets/gigaspeech2/data/th/train/...` needs
+`audio_root: /home/my/path/datasets/gigaspeech2/data/th`. Passing the `train/` directory itself
+builds `.../th/train/train/8/...` and misses 100% of lookups — a trap worth naming, since it
+reads as correct.
+
+The first `validate` run missed all 9.5M clips for exactly this reason: `audio_root` still held
+a value guessed during planning. It cost 123 seconds to find, rather than days of GPU time,
+which is what that ladder step exists for.
+
+### Still open
+
+GPU-only paths — OOM recovery, `empty_cache()`, the `max_consecutive_batch_failures` abort — are
+unit-tested with fakes but have never run on real hardware. Ladder step 3
+(`transcribe --limit 5000`) is their first real exercise.
