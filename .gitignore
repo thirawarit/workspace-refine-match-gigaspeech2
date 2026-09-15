@@ -1,0 +1,51 @@
+# Claude Code
+.claude/
+CLAUDE.local.md
+*.plan.md
+
+# Secrets
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+secrets.yaml
+hf_token*
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+dist/
+build/
+
+# Input / output / logs (examples are tracked)
+data/*
+!data/.gitkeep
+!data/examples/
+logs/*
+!logs/.gitkeep
+*.tsv
+*.jsonl
+!tests/fixtures/*.tsv
+!tests/fixtures/*.jsonl
+predicted-*
+combined-*
+
+# Model artifacts
+*.nemo
+*.ckpt
+NeMo/
+
+# Notebooks
+.ipynb_checkpoints/
+notebooks/*
+!notebooks/.gitkeep
+
+# macOS
+.DS_Store
