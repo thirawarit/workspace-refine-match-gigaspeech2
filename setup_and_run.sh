@@ -14,6 +14,15 @@
 #   ./setup_and_run.sh --setup-only
 #   ./setup_and_run.sh transcribe --input data/train_refined.tsv --config configs/vps_h100.yaml
 #   ./setup_and_run.sh --skip-setup transcribe --input ...   # fast restart
+#
+# Environment overrides:
+#   SCRATCH_ROOT     base for TMPDIR and UV_CACHE_DIR (default: <repo>)
+#   ASR_TMPDIR       override the wheel unpack dir (default: <repo>/.tmp; an
+#                    inherited TMPDIR is deliberately ignored — see note below)
+#   ASR_UV_CACHE_DIR override uv's download cache (default: <repo>/.uv-cache)
+#   MIN_FREE_MB      refuse to install below this free space (default: 15000)
+#   NEMO_ROOT        NeMo checkout location (default: <repo>/NeMo)
+#   NEMO_EXTRAS      NeMo extras (default: asr,cu13; use asr,cu12 or asr)
 
 set -Eeuo pipefail
 
@@ -24,6 +33,34 @@ readonly NEMO_REPO="https://github.com/NVIDIA/NeMo"
 NEMO_ROOT="${NEMO_ROOT:-${REPO_DIR}/NeMo}"
 # cu13 matches the VPS (CUDA 13.0); use asr,cu12 or plain asr elsewhere.
 NEMO_EXTRAS="${NEMO_EXTRAS:-asr,cu13}"
+
+# Where package installs unpack wheels and cache downloads.
+#
+# The default /tmp is often a small partition (sometimes a RAM-backed tmpfs).
+# Large wheels unpack there before being copied into the venv, so running out
+# of space produces a PARTIAL install: some .so files present, the rest
+# silently missing. That is exactly how nvidia-cudnn-cu13 ended up shipping 2
+# of ~10 libraries, with libcudnn.so.9 among the casualties, and it surfaces
+# much later as an unrelated-looking ImportError.
+#
+# Default both onto the repo's own disk, which is sized for bulk data. Override
+# either if the repo lives on a small volume:
+#   SCRATCH_ROOT=/data/big ./setup_and_run.sh --setup-only
+# NOTE: TMPDIR is almost always already set (macOS presets it; many Linux
+# shells inherit /tmp). So `${TMPDIR:-default}` would keep the inherited value
+# and this whole guard would silently do nothing — which is precisely the
+# failure it exists to prevent. Honour an explicit ASR_TMPDIR override instead,
+# and otherwise take control of TMPDIR unconditionally.
+# Default into the repo itself: /tmp is too small for the CUDA wheels, while
+# the working directory has room.
+SCRATCH_ROOT="${SCRATCH_ROOT:-${REPO_DIR}}"
+TMPDIR="${ASR_TMPDIR:-${SCRATCH_ROOT}/.tmp}"
+UV_CACHE_DIR="${ASR_UV_CACHE_DIR:-${SCRATCH_ROOT}/.uv-cache}"
+# uv prefers its own cache over TMPDIR for extraction, so both must be set.
+export TMPDIR UV_CACHE_DIR
+
+# Refuse to install with less headroom than the CUDA wheel set needs.
+readonly MIN_FREE_MB="${MIN_FREE_MB:-15000}"
 
 log() { printf '%s | %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >&2; }
 die() { log "ERROR: $*"; exit 1; }
@@ -43,6 +80,52 @@ ensure_uv() {
   command -v uv >/dev/null 2>&1 || die "uv not found. Install it:
   curl -LsSf https://astral.sh/uv/install.sh | sh"
   log "using uv $(uv --version)"
+}
+
+free_mb() {
+  # Portable-enough free space in MB for a path (POSIX df -P, 1024-blocks).
+  df -Pk "$1" 2>/dev/null | awk 'NR==2 {print int($4/1024)}'
+}
+
+prepare_temp_dirs() {
+  mkdir -p "$TMPDIR" "$UV_CACHE_DIR" \
+    || die "could not create TMPDIR=${TMPDIR} / UV_CACHE_DIR=${UV_CACHE_DIR}"
+  log "TMPDIR=${TMPDIR}"
+  log "UV_CACHE_DIR=${UV_CACHE_DIR}"
+
+  local avail
+  avail="$(free_mb "$TMPDIR")"
+  [[ -n "$avail" ]] || return 0
+
+  if (( avail < MIN_FREE_MB )); then
+    # Hard stop rather than a warning: a partial wheel install fails later, in
+    # a place that looks nothing like a disk problem.
+    die "only ${avail} MB free on ${TMPDIR}, need ~${MIN_FREE_MB} MB.
+The CUDA wheels (torch + cuDNN + cuBLAS + NCCL) unpack here before install, and
+running out of space yields a silently PARTIAL install.
+Point somewhere larger: SCRATCH_ROOT=/path/with/space $0 --setup-only"
+  fi
+  log "${avail} MB free on ${TMPDIR}"
+}
+
+verify_cuda_libraries() {
+  # A truncated wheel leaves the package "installed" per uv pip list while the
+  # library torch actually links against is absent, so check the file itself.
+  local site_packages cudnn_dir
+  site_packages="$(uv run --no-sync python -c \
+    'import sysconfig; print(sysconfig.get_paths()["purelib"])' 2>/dev/null)" || return 0
+  cudnn_dir="${site_packages}/nvidia/cudnn/lib"
+  [[ -d "$cudnn_dir" ]] || return 0
+
+  if [[ ! -f "${cudnn_dir}/libcudnn.so.9" ]]; then
+    die "nvidia-cudnn-cu13 is installed but libcudnn.so.9 is missing from
+${cudnn_dir}
+(found: $(ls "$cudnn_dir" 2>/dev/null | tr '\n' ' '))
+This is a partial wheel extraction, usually from a full or small TMPDIR.
+Fix, with TMPDIR now pointing at ${TMPDIR}:
+  uv pip install --force-reinstall --no-cache nvidia-cudnn-cu13"
+  fi
+  log "cuDNN libraries present"
 }
 
 sync_environment() {
@@ -178,10 +261,14 @@ main() {
   ensure_uv
 
   if [[ "$skip_setup" -eq 0 ]]; then
+    # Must precede every install step: both uv sync and the NeMo install unpack
+    # wheels through TMPDIR/UV_CACHE_DIR.
+    prepare_temp_dirs
     verify_lockfile
     sync_environment
     ensure_nemo
     export_cuda_library_path
+    verify_cuda_libraries
     verify_environment
   else
     export NEMO_ROOT

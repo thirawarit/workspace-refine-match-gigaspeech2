@@ -12,6 +12,11 @@ CLAUDE.local.md
 secrets.yaml
 hf_token*
 
+# Install-time temp space (setup_and_run.sh points TMPDIR/UV_CACHE_DIR here
+# because /tmp is too small for the CUDA wheels). Multi-GB — never commit.
+.tmp/
+.uv-cache/
+
 # Python
 __pycache__/
 *.py[cod]

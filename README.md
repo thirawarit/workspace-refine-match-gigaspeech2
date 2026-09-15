@@ -47,6 +47,44 @@ identically but compare unequal. NFC does *not* fold them: U+0E33's decompositio
 `<compat>`, so NFC and NFD both leave either spelling alone. Only NFKC maps ำ → ํา. Without it,
 WER would count correct predictions as errors.
 
+## Install-time temp space
+
+Large CUDA wheels (torch, cuDNN, cuBLAS, NCCL) unpack to a temp directory before landing in the
+venv. The system default `/tmp` is often a small partition — sometimes a RAM-backed tmpfs — and
+running out of space there produces a **silently partial install**: some `.so` files present,
+the rest missing. It surfaces much later as a baffling `ImportError`, e.g.
+`libcudnn.so.9: cannot open shared object file`, long after the install reported success.
+
+`setup_and_run.sh` therefore points both temp locations at the repo's own disk and refuses to
+install without enough headroom:
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `SCRATCH_ROOT` | `<repo>` | Base for the two below |
+| `ASR_TMPDIR` | `<repo>/.tmp` | Where wheels unpack — becomes `TMPDIR` |
+| `ASR_UV_CACHE_DIR` | `<repo>/.uv-cache` | uv's download cache (uv prefers this over `TMPDIR`) |
+| `MIN_FREE_MB` | `15000` | Abort below this much free space |
+
+The script **overrides any inherited `TMPDIR`** rather than deferring to it. macOS presets
+`TMPDIR`, and most Linux shells inherit `/tmp`, so a `${TMPDIR:-default}` fallback would always
+keep the inherited value and never take effect — leaving you on exactly the small partition this
+is meant to avoid. Use `ASR_TMPDIR` to choose a different location deliberately.
+
+If the repo itself lives on a small volume, redirect them:
+
+```bash
+SCRATCH_ROOT=/data/big ./setup_and_run.sh --setup-only
+```
+
+Recovering from an already-partial install:
+
+```bash
+export TMPDIR=/data/big/tmp UV_CACHE_DIR=/data/big/uv-cache
+uv pip install --force-reinstall --no-cache nvidia-cudnn-cu13
+```
+
+`--no-cache` matters: without it a corrupt cached wheel is simply re-extracted.
+
 ## The NeMo dependency
 
 **NeMo is deliberately not in `requirements.txt`.** Stock `nemo_toolkit` does not contain
