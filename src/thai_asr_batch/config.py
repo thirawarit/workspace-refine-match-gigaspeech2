@@ -26,10 +26,12 @@ class PathsConfig:
 @dataclass(frozen=True)
 class ModelConfig:
     hf_repo_id: str
-    nemo_filename: str
     local_model_path: Optional[Path]
     target_lang: str
-    strip_lang_tags: bool
+    task: str
+    dtype: str
+    max_new_tokens: int
+    sampling_rate: int
 
 
 @dataclass(frozen=True)
@@ -53,6 +55,7 @@ class AudioConfig:
     resample_on_the_fly: bool
     ffmpeg_binary: str
     ffmpeg_timeout_seconds: float
+    max_duration_seconds: float
 
 
 @dataclass(frozen=True)
@@ -87,7 +90,7 @@ class AppConfig:
         material: Dict[str, Any] = {
             "audio_root": str(self.paths.audio_root),
             "target_lang": self.model.target_lang,
-            "strip_lang_tags": self.model.strip_lang_tags,
+            "task": self.model.task,
             "hf_repo_id": self.model.hf_repo_id,
         }
         blob: str = json.dumps(material, sort_keys=True, ensure_ascii=False)
@@ -141,15 +144,14 @@ def load_config(
             scratch_dir=Path(paths_raw.get("scratch_dir", "./data/scratch")).expanduser(),
         ),
         model=ModelConfig(
-            hf_repo_id=model_raw.get(
-                "hf_repo_id", "typhoon-ai/typhoon-asr-streaming-nemotron-0.6b"
-            ),
-            nemo_filename=model_raw.get(
-                "nemo_filename", "typhoon-asr-streaming-nemotron-0.6b.nemo"
-            ),
+            hf_repo_id=model_raw.get("hf_repo_id", "typhoon-ai/typhoon-whisper-medium"),
             local_model_path=_optional_path(model_raw.get("local_model_path")),
-            target_lang=model_raw.get("target_lang", "th-TH"),
-            strip_lang_tags=bool(model_raw.get("strip_lang_tags", True)),
+            # Whisper uses ISO-639-1 ("th"), not a BCP-47 tag ("th-TH").
+            target_lang=model_raw.get("target_lang", "th"),
+            task=model_raw.get("task", "transcribe"),
+            dtype=model_raw.get("dtype", "bfloat16"),
+            max_new_tokens=int(model_raw.get("max_new_tokens", 440)),
+            sampling_rate=int(model_raw.get("sampling_rate", 16000)),
         ),
         device=DeviceConfig(
             prefer=list(device_raw.get("prefer", ["cuda", "cpu"])),
@@ -169,6 +171,7 @@ def load_config(
             resample_on_the_fly=bool(audio_raw.get("resample_on_the_fly", True)),
             ffmpeg_binary=audio_raw.get("ffmpeg_binary", "ffmpeg"),
             ffmpeg_timeout_seconds=float(audio_raw.get("ffmpeg_timeout_seconds", 60.0)),
+            max_duration_seconds=float(audio_raw.get("max_duration_seconds", 30.0)),
         ),
         checkpoint=CheckpointConfig(
             enabled=bool(ckpt_raw.get("enabled", True)),
@@ -191,7 +194,7 @@ def load_config(
 def resolve_device(cfg: DeviceConfig) -> str:
     """Pick a torch device string by walking ``prefer`` in order.
 
-    MPS is skipped unless explicitly opted in: NeMo on Apple MPS tends to fail
+    MPS is skipped unless explicitly opted in: Whisper on Apple MPS tends to fail
     outright for RNN-T rather than degrade gracefully, so a silent selection
     would turn a local smoke test into a confusing crash.
     """
@@ -203,7 +206,7 @@ def resolve_device(cfg: DeviceConfig) -> str:
             if not cfg.allow_mps:
                 LOGGER.warning(
                     "device 'mps' requested but allow_mps is false; skipping "
-                    "(NeMo RNN-T support on MPS is unreliable)"
+                    "(Whisper generation on MPS is slow and historically flaky)"
                 )
                 continue
             if _mps_available():

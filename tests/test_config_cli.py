@@ -17,10 +17,20 @@ DEFAULT_CONFIG: Path = Path("configs/default.yaml")
 
 def test_default_config_loads() -> None:
     cfg: AppConfig = load_config(DEFAULT_CONFIG)
-    assert cfg.model.target_lang == "th-TH"
-    assert cfg.model.strip_lang_tags is True
+    # Whisper takes ISO-639-1 ("th"), not a BCP-47 tag ("th-TH").
+    assert cfg.model.target_lang == "th"
+    assert cfg.model.task == "transcribe"
+    assert cfg.model.hf_repo_id == "typhoon-ai/typhoon-whisper-medium"
     assert cfg.batch.batch_size == 16
     assert cfg.audio.target_sample_rate == 16000
+
+
+def test_whisper_window_is_configured() -> None:
+    """The 30s encoder window must be explicit, not implied."""
+    cfg: AppConfig = load_config(DEFAULT_CONFIG)
+    assert cfg.audio.max_duration_seconds == 30.0
+    assert cfg.model.max_new_tokens == 440
+    assert cfg.model.dtype in {"bfloat16", "float16", "float32"}
 
 
 def test_cuda_index_is_pinned_to_zero() -> None:

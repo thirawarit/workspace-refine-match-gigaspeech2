@@ -10,6 +10,7 @@ dependencies = [
     "soundfile==0.12.1",
     "torch>=2.6.0",
     "tqdm==4.67.1",
+    "transformers>=4.50.3",
 ]
 
 [project.scripts]

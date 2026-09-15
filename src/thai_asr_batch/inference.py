@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import (Iterable, Iterator, Optional)
 
 from .audio import (AudioError, AudioProbe, ensure_conforming, estimate_duration,
-                    probe_audio)
+                    exceeds_window, probe_audio)
 from .batching import (BatchOutcome, DeadContextError, SystematicFailureError,
                        WorkItem, bucketed_batches, transcribe_with_isolation)
 from .checkpoint import CheckpointStore
@@ -94,7 +94,7 @@ def run_inference(
         return stats
 
     device: str = resolve_device(cfg.device)
-    model: AsrModelWrapper = AsrModelWrapper(cfg.model, device)
+    model: AsrModelWrapper = AsrModelWrapper(cfg.model, device, audio_cfg=cfg.audio)
     model.load()
 
     append: bool = resume and cfg.checkpoint.enabled and output_path.exists()
@@ -242,6 +242,19 @@ def _prepare_one(record: Record, cfg: AppConfig) -> Optional[_PreparedItem]:
         return None
 
     duration: float = estimate_duration(resolved, probe=probe if resolved == audio_path else None)
+
+    # Whisper keeps only the first encoder window and truncates the rest with no
+    # error, so a long clip returns partial text that reads like a bad
+    # transcription. Flag it; still transcribe, so the row is not lost.
+    if exceeds_window(duration, cfg.audio):
+        log_clip_failure(
+            record.segment_id,
+            audio_path,
+            f"clip is {duration:.1f}s, longer than the "
+            f"{cfg.audio.max_duration_seconds:.0f}s window; only the first "
+            "window will be transcribed",
+        )
+
     final_probe: AudioProbe = probe if resolved == audio_path else probe_audio(resolved)
     return _PreparedItem(record=record, probe=final_probe, duration=duration)
 
@@ -253,12 +266,17 @@ def _dry_run(records: Iterable[Record], cfg: AppConfig, stats: InferenceStats) -
     committed to it.
     """
     non_conforming: int = 0
+    over_window: int = 0
     for record in records:
         audio_path: Optional[Path] = record.audio_filepath
         if audio_path is None:
             stats.skipped_missing_audio += 1
             continue
         probe: AudioProbe = probe_audio(audio_path)
+        if probe.is_readable and exceeds_window(
+            probe.duration_seconds or 0.0, cfg.audio
+        ):
+            over_window += 1
         if not probe.is_readable:
             stats.skipped_missing_audio += 1
             LOGGER.debug("%s: %s", record.segment_id, probe.error)
@@ -271,6 +289,13 @@ def _dry_run(records: Iterable[Record], cfg: AppConfig, stats: InferenceStats) -
     if non_conforming:
         LOGGER.warning(
             "%d file(s) need resampling (will convert on the fly)", non_conforming
+        )
+    if over_window:
+        # Reported up front so the real exposure is known before GPU time is spent.
+        LOGGER.warning(
+            "%d clip(s) exceed the %.0fs window and will be truncated to the "
+            "first window",
+            over_window, cfg.audio.max_duration_seconds,
         )
 
 

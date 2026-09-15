@@ -14,7 +14,7 @@ crash-resume and per-clip failure isolation core requirements rather than polish
 
 | # | Requirement |
 |---|---|
-| R1 | Use model `typhoon-ai/typhoon-asr-streaming-nemotron-0.6b` (NeMo FastConformer-Transducer, RNN-T). |
+| R1 | Use model `typhoon-ai/typhoon-whisper-medium` (Whisper-medium fine-tune, encoder-decoder). |
 | R2 | Accept TSV or JSONL input; emit predictions in the same format. `AbC.tsv` → `predicted-AbC.tsv`. |
 | R3 | Combine input + predictions into a new file with columns `segment_id`, `orig_text`, `pred_text`. |
 
@@ -88,27 +88,32 @@ further cleanup is lossy and belongs in a separate, tunable scoring step.
 
 ### 5.2 Device policy
 
-`cuda → cpu`. MPS is selected **only** behind an explicit `allow_mps` opt-in, because NeMo on
-Apple MPS tends to fail outright for RNN-T rather than degrade gracefully. The runner also
+`cuda → cpu`. MPS is selected **only** behind an explicit `allow_mps` opt-in: Whisper on Apple
+MPS is slow and historically flaky for long generations, and a silent fallback would turn a
+smoke test into a confusing hang. The runner also
 exports `CUDA_VISIBLE_DEVICES=0` so the index-0 constraint holds belt-and-braces.
 
-### 5.3 Critical dependency constraint
+### 5.3 Model backend
 
-Stock `nemo_toolkit` does **not** contain `EncDecRNNTBPEModelWithPrompt`, which this model
-requires. NeMo must be built from source at pinned commit **`907edfd`**:
+`typhoon-ai/typhoon-whisper-medium` — a Whisper-medium fine-tune (0.8B params) loaded through
+`transformers`. An ordinary lockfile dependency: no source build, no pinned commit, no extras.
 
-```bash
-git clone https://github.com/NVIDIA/NeMo && cd NeMo && git checkout 907edfd
-uv pip install -e '.[asr,cu13]'
-export NEMO_ROOT=/path/to/NeMo
+```python
+processor = WhisperProcessor.from_pretrained(model_id)
+model = WhisperForConditionalGeneration.from_pretrained(model_id, dtype=torch.bfloat16)
+ids = model.generate(feats, language="th", task="transcribe", max_new_tokens=440)
 ```
 
-Not resolvable through a lockfile, therefore deliberately **absent from `uv.lock`** and handled
-by `setup_and_run.sh` (§9). The README documents the rationale so a future reader does not "fix"
-it by adding a dependency pin.
+Two constraints shape the pipeline:
 
-The `[asr]` extra is **required** — see §9 and §12; a bare `-e .` omits hydra and the import
-fails at runtime.
+- **`language="th"`** (ISO-639-1), not `"th-TH"`.
+- **A hard 30-second encoder window.** Longer clips are truncated by the feature extractor with
+  no error, yielding partial text that reads like a bad transcription. `audio.max_duration_seconds`
+  detects them; they are logged to the error journal and still transcribed (first window only),
+  so no row is lost, and `validate` reports the count before GPU time is spent.
+
+This replaced an earlier NeMo backend whose source build, pinned commit, optional extras and
+prompt/tokenizer machinery produced six consecutive environment failures. See §12.
 
 ### 5.4 Model checkpoint
 
@@ -124,7 +129,7 @@ src/thai_asr_batch/
 ├── records.py        # Record normal form + path<->segment_id rules
 ├── io_formats.py     # TSV/JSONL readers+writers behind one Protocol
 ├── audio.py          # probe + resample-on-the-fly (no-op fast path)
-├── model.py          # NeMo wrapper, deferred import
+├── model.py          # Whisper wrapper, deferred import
 ├── batching.py       # length bucketing + failure isolation
 ├── checkpoint.py     # sharded resume store
 ├── inference.py      # orchestrator
@@ -194,16 +199,18 @@ approximation is fine.
 
 ### 6.4 Model wrapper
 
-`import nemo.collections.asr` happens **inside `load()`**, never at module import. This is what
-lets the entire test suite and `--dry-run` work with NeMo uninstalled.
+`import transformers` happens **inside `load()`**, never at module import. This is what lets the
+entire test suite and `--dry-run` run on a machine that never touches the model.
 
-`load()` runs the model-card sequence — `restore_from(map_location=device)`, `eval()`,
-`set_inference_prompt("th-TH")`, `decoding.set_strip_lang_tags(True)` — each of the latter three
-guarded by `hasattr` so version drift fails loudly naming commit `907edfd` instead of with an
-opaque `AttributeError` ten minutes in.
+`load()` builds a `WhisperProcessor` and `WhisperForConditionalGeneration` from the configured
+repo (or `local_model_path`), casts to the configured dtype and moves to the resolved device.
+A native-library failure (`OSError`) is reported distinctly from a missing package, since a
+partially extracted CUDA wheel presents that way.
 
-`transcribe_batch` normalizes NeMo's return shape (it has returned both `List[Hypothesis]` and
-`List[List[Hypothesis]]` across versions) and asserts length parity with its input.
+`transcribe_batch` decodes each path to a mono float32 array via `audio.load_samples`, batches
+them through the processor, calls `generate(language=..., task=..., max_new_tokens=...)` under
+`torch.no_grad()`, and decodes with `skip_special_tokens=True`. It asserts length parity with
+its input so a silent batch/result mismatch cannot corrupt the segment_id→text pairing.
 
 ### 6.5 Combine
 
@@ -262,41 +269,31 @@ on PATH (the local one is 3.9.6, not the 3.10.20 in SYSTEM.md).
 Dependencies are added only with `uv add` / `uv add --dev` — never `uv pip install`, never by
 hand-editing `pyproject.toml`, since both bypass the lockfile and break reproducibility.
 
-**NeMo is the sole exception.** It cannot be expressed in `uv.lock` at all: the model needs
-`EncDecRNNTBPEModelWithPrompt`, which exists only in a source build at commit `907edfd`. It is
-therefore installed into the synced venv separately, after `uv sync`.
+Every dependency, the model backend included, resolves from `uv.lock`. There is no out-of-band
+install step.
 
-Two constraints that commit imposes, both discovered the hard way:
+**`HF_HOME` is redirected** to `<repo>/.hf-cache` alongside `TMPDIR` and `UV_CACHE_DIR`: the
+checkpoint is several GB and would otherwise land in `~/.cache`, potentially on a smaller
+filesystem than the one deliberately chosen.
 
-- **The `[asr]` extra is required.** A bare `uv pip install -e "$NEMO_ROOT"` installs only
-  nemo-toolkit's base dependencies, which omit `hydra-core`, `omegaconf` and `lightning`; the
-  import then fails with `No module named 'hydra'`. At `907edfd` these live in NeMo's own
-  `[project.optional-dependencies].asr` — that commit ships **no** `requirements/*.txt` files.
-  The `asr-only` extra is not a substitute; it excludes hydra. `cu13` is appended to match the
-  VPS's CUDA 13.0, overridable via `NEMO_EXTRAS`.
-- **`torch>=2.6.0`.** This project's lock pins torch accordingly. An earlier `torch==2.5.1` pin
-  (chosen before NeMo's constraint was known) would have made the NeMo install either fail to
-  resolve or silently upgrade torch out from under the lockfile.
 
 `setup_and_run.sh`:
 
 1. Verify `uv` is present.
 2. `uv lock --check` — abort if `pyproject.toml` and `uv.lock` have drifted.
 3. `uv sync --frozen` — install exactly the committed lockfile, no re-resolution.
-4. If `$NEMO_ROOT` unset/absent: clone NeMo, `git checkout 907edfd`,
-   `uv pip install -e "$NEMO_ROOT[$NEMO_EXTRAS]"` (default extras `asr,cu13`).
    If present, verify `git rev-parse HEAD` starts with `907edfd` and abort on drift — the single
    most likely cause of a mysterious `EncDecRNNTBPEModelWithPrompt` failure.
-5. Export `NEMO_ROOT` and `CUDA_VISIBLE_DEVICES=0`.
-6. Verify `ffmpeg -version`; import-check `nemo.collections.asr`.
-7. `exec uv run --no-sync python -m thai_asr_batch.cli "$@"`.
+5. Export `CUDA_VISIBLE_DEVICES` and the CUDA wheel loader path.
+4. Verify `ffmpeg -version`; import-check `torch` and `transformers`.
+6. `exec uv run --no-sync python -m thai_asr_batch.cli "$@"`.
 
 Flags `--setup-only` / `--skip-setup`, and `uv run --no-sync` on the exec, so a 10-day run never
 stalls re-resolving dependencies on restart. Idempotent and safe to re-run.
 
 ## 10. Testing
 
-Tests run in seconds on the Mac with **no GPU and NeMo uninstalled**, guaranteed by the deferred
+Tests run in seconds on the Mac with **no GPU and transformers unused**, guaranteed by the deferred
 import. `conftest.py` builds real tiny 16 kHz WAVs via the stdlib `wave` module (no binary
 fixtures in git) and a `FakeAsrModel` returning deterministic text, raising on ids containing
 `"boom"` to drive failure paths.
@@ -331,10 +328,8 @@ fixtures in git) and a `FakeAsrModel` returning deterministic text, raising on i
 | Unusable CUDA context after OOM | `max_consecutive_batch_failures` abort. |
 | Memory growth over 10 days | LRU-bounded shard sets; generator readers; no hypothesis accumulation. |
 | Disk fills | Startup size estimate; session-log rotation; `status` reports headroom. |
-| NeMo commit drift | Setup asserts `907edfd`; `load()` `hasattr`-guards each card-specific API. |
-| NeMo installed without `[asr]` | `NEMO_EXTRAS` defaults to `asr,cu13`; `ensure_nemo` reinstalls when hydra/omegaconf/lightning are absent. `asr-only` is **not** a substitute — it excludes hydra. |
-| torch below NeMo's floor | `pyproject.toml` pins `torch>=2.6.0`, which NeMo `907edfd` requires. Resolves to 2.14.0, as NeMo sets no upper bound. |
 | CUDA `.so` files off the loader path | `export_cuda_library_path` globs `<site-packages>/nvidia/*/lib` into `LD_LIBRARY_PATH`, on the `--skip-setup` path too (it is per-process). |
+| Clip longer than the 30s encoder window | `exceeds_window` flags it, logs to the error journal and transcribes the first window; `validate` reports the total up front. |
 | Partial wheel from a small or full `/tmp` | `TMPDIR`/`UV_CACHE_DIR` default into the repo; `prepare_temp_dirs` aborts below `MIN_FREE_MB`; `verify_cuda_libraries` checks for `libcudnn.so.9` itself, since a truncated wheel still reports as installed. |
 | torch importable but its libraries unloadable | `_cuda_available` catches `OSError` as well as `ImportError` and degrades to CPU with a warning, so `validate`/`--dry-run` still run on a broken box. |
 | Silent quality regression | Sample predictions logged at DEBUG; `status` reports empty-prediction rate, so an all-empty run is caught in hour 1, not day 10. |

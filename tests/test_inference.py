@@ -21,11 +21,13 @@ from conftest import (FakeAsrModel, write_wav)
 
 @pytest.fixture(autouse=True)
 def _no_real_model(monkeypatch: pytest.MonkeyPatch) -> FakeAsrModel:
-    """Swap the NeMo wrapper for the fake everywhere inference constructs one."""
+    """Swap the model wrapper for the fake everywhere inference constructs one."""
     fake: FakeAsrModel = FakeAsrModel()
     monkeypatch.setattr(
         "thai_asr_batch.inference.AsrModelWrapper",
-        lambda cfg, device: fake,
+        # **kwargs absorbs audio_cfg, which the Whisper wrapper needs to decode
+        # samples; the fake works from paths alone.
+        lambda cfg, device, **kwargs: fake,
     )
     return fake
 

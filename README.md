@@ -89,25 +89,27 @@ uv pip install --force-reinstall --no-cache nvidia-cudnn-cu13
 
 ## The NeMo dependency
 
-**NeMo cannot live in `uv.lock`.** Stock `nemo_toolkit` does not contain
-`EncDecRNNTBPEModelWithPrompt`, which this model requires, so it is built from source at pinned
-commit `907edfd` and installed into the synced venv separately:
+The ASR backend is [`typhoon-ai/typhoon-whisper-medium`](https://huggingface.co/typhoon-ai/typhoon-whisper-medium),
+a Whisper-medium fine-tune (0.8B params) loaded through `transformers`. It installs straight
+from the lockfile — no source build, no pinned commit, no optional extras.
 
-```bash
-git clone https://github.com/NVIDIA/NeMo && cd NeMo
-git checkout 907edfd && uv pip install -e '.[asr,cu13]'
-export NEMO_ROOT=/path/to/NeMo
+```python
+processor = WhisperProcessor.from_pretrained(model_id)
+model = WhisperForConditionalGeneration.from_pretrained(model_id, dtype=torch.bfloat16)
+ids = model.generate(feats, language="th", task="transcribe", max_new_tokens=440)
 ```
 
-**The `[asr]` extra is required, not optional.** A bare `-e .` installs only nemo-toolkit's base
-dependencies, omitting `hydra-core`, `omegaconf` and `lightning`; the import then fails with
-`No module named 'hydra'`. At `907edfd` those live in NeMo's own
-`[project.optional-dependencies].asr` — that commit ships no `requirements/*.txt` files at all.
-The `asr-only` extra is **not** a substitute: it excludes hydra. `cu13` matches CUDA 13 hosts;
-use `cu12` elsewhere, or override with `NEMO_EXTRAS`.
+Two constraints worth knowing:
 
-NeMo `907edfd` also requires `torch>=2.6.0`, which is why this project's `pyproject.toml` pins
-torch that way rather than to an older release.
+- **`language="th"`**, ISO-639-1 — not the BCP-47 `"th-TH"`.
+- **A hard 30-second encoder window.** Longer clips are silently truncated to the first window
+  by the feature extractor, returning partial text that reads like a poor transcription rather
+  than an error. The pipeline detects these via `audio.max_duration_seconds`, logs them to the
+  error journal, and still transcribes the first window so no row is lost. `validate` reports
+  the count up front, so the real exposure is known before GPU time is spent.
+
+The checkpoint is several GB and downloads to `HF_HOME`, which `setup_and_run.sh` points at
+`<repo>/.hf-cache` rather than `~/.cache` — see the temp-space section above.
 
 `setup_and_run.sh` does this automatically and verifies the commit on every run. A drifted
 checkout is the most likely cause of a mysterious missing-class error, so the script aborts
